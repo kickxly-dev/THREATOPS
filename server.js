@@ -269,6 +269,76 @@ async function dbGetHistoryByToken(token) {
   return { id: r.id, ts: r.ts, target: r.target, email: r.email, total: r.total_findings, high: r.high_count, medium: r.medium_count, low: r.low_count, info: r.info_count, results: r.results, findings: r.findings };
 }
 
+// ─── ADDITIONAL ADMIN DB OPS ─────────────────────────────────────────────────
+async function dbGetSetting(key) {
+  if (!pool) {
+    try { const cfg = JSON.parse(fsSync.readFileSync(CONFIG_FILE, 'utf8')); return cfg[key] || null; } catch { return null; }
+  }
+  const { rows } = await pool.query('SELECT value FROM settings WHERE key=$1', [key]);
+  return rows[0]?.value || null;
+}
+
+async function dbSetSetting(key, value) {
+  if (!pool) {
+    let cfg = {}; try { cfg = JSON.parse(await fs.readFile(CONFIG_FILE, 'utf8')); } catch {}
+    cfg[key] = value; await fs.writeFile(CONFIG_FILE, JSON.stringify(cfg, null, 2)); return;
+  }
+  await pool.query('INSERT INTO settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=$2', [key, value]);
+}
+
+async function dbDeleteSetting(key) {
+  if (!pool) {
+    let cfg = {}; try { cfg = JSON.parse(await fs.readFile(CONFIG_FILE, 'utf8')); } catch {}
+    delete cfg[key]; await fs.writeFile(CONFIG_FILE, JSON.stringify(cfg, null, 2)); return;
+  }
+  await pool.query('DELETE FROM settings WHERE key=$1', [key]);
+}
+
+async function dbSetUserAdmin(userId, isAdmin) {
+  if (!pool) {
+    const users = fileLoadUsers();
+    const u = users.find(u => u.id === userId); if (!u) return;
+    u.isAdmin = isAdmin; await fileSaveUsers(users); return;
+  }
+  await pool.query('UPDATE users SET is_admin=$1 WHERE id=$2', [isAdmin, userId]);
+}
+
+async function dbResetPassword(userId, hash) {
+  if (!pool) {
+    const users = fileLoadUsers();
+    const u = users.find(u => u.id === userId); if (!u) return;
+    u.passwordHash = hash; await fileSaveUsers(users); return;
+  }
+  await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2', [hash, userId]);
+}
+
+async function dbWipeUserHistory(userId) {
+  if (!pool) {
+    try {
+      const files = (await fs.readdir(HISTORY_DIR)).filter(f => f.endsWith('.json'));
+      for (const f of files) {
+        try { const d = JSON.parse(await fs.readFile(path.join(HISTORY_DIR, f), 'utf8')); if (d.userId === userId) await fs.unlink(path.join(HISTORY_DIR, f)); } catch {}
+      }
+    } catch {} return;
+  }
+  await pool.query('DELETE FROM scan_history WHERE user_id=$1', [userId]);
+}
+
+async function dbGetScansByDay() {
+  if (!pool) {
+    const result = {};
+    try {
+      const files = (await fs.readdir(HISTORY_DIR)).filter(f => f.endsWith('.json'));
+      for (const f of files) {
+        try { const d = JSON.parse(await fs.readFile(path.join(HISTORY_DIR, f), 'utf8')); const day = d.ts?.substring(0,10); if (day) result[day] = (result[day]||0)+1; } catch {}
+      }
+    } catch {}
+    return Object.entries(result).sort().slice(-14).map(([day,count]) => ({day,count}));
+  }
+  const { rows } = await pool.query(`SELECT TO_CHAR(ts,'YYYY-MM-DD') AS day, COUNT(*)::int AS count FROM scan_history WHERE ts > NOW()-INTERVAL '14 days' GROUP BY day ORDER BY day`);
+  return rows;
+}
+
 // ─── PASSWORD UTILS ───────────────────────────────────────────────────────────
 async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -364,6 +434,30 @@ function requireAdmin(req, res, next) {
   }
   next();
 }
+
+// ─── MAINTENANCE PAGE ────────────────────────────────────────────────────────
+const maintenancePage = () => `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>THREATOPS — Maintenance</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#050507;color:#e0e0e8;font-family:'JetBrains Mono',monospace;height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;}
+.logo{font-family:'Share Tech Mono',monospace;font-size:22px;color:#ff2a2a;letter-spacing:4px;margin-bottom:16px;}
+h1{font-size:13px;color:#8888a0;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px;}
+p{font-size:10.5px;color:#444458;}</style></head>
+<body><div><div class="logo">⚔ THREATOPS</div><h1>Under Maintenance</h1><p>The system is temporarily offline. Check back soon.</p></div></body></html>`;
+
+// ─── MAINTENANCE MIDDLEWARE ───────────────────────────────────────────────────
+app.use(async (req, res, next) => {
+  const skip = ['/login','/api/login','/api/logout','/api/register'];
+  if (skip.includes(req.path) || req.path.startsWith('/admin') || req.path.startsWith('/api/admin') || req.path.startsWith('/report/')) return next();
+  if (getSession(req)?.isAdmin) return next();
+  try {
+    const val = await dbGetSetting('MAINTENANCE_MODE');
+    if (val === 'true') {
+      if (req.path.startsWith('/api/')) return res.status(503).json({ error: 'System is under maintenance. Try again later.' });
+      return res.send(maintenancePage());
+    }
+  } catch {}
+  next();
+});
 
 // ─── LOGIN PAGE ──────────────────────────────────────────────────────────────
 const loginPage = (opts = {}) => `<!DOCTYPE html>
@@ -535,8 +629,100 @@ app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
   catch (e) { res.status(404).json({ error: e.message }); }
 });
 
+app.post('/api/admin/users/:id/promote', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  if (id === req.user.userId) return res.status(400).json({ error: 'Cannot change your own role' });
+  const user = await dbFindUserById(id).catch(() => null);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  await dbSetUserAdmin(id, !user.isAdmin);
+  res.json({ ok: true, isAdmin: !user.isAdmin });
+});
+
+app.post('/api/admin/users/:id/reset-password', requireAdmin, async (req, res) => {
+  const { password } = req.body;
+  if (!password || password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  const user = await dbFindUserById(req.params.id).catch(() => null);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  await dbResetPassword(req.params.id, await hashPassword(password));
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/users/:id/impersonate', requireAdmin, async (req, res) => {
+  const user = await dbFindUserById(req.params.id).catch(() => null);
+  if (!user) return res.status(404).send('User not found');
+  if (user.isAdmin) return res.status(400).send('Cannot impersonate another admin');
+  const token = createSession(user.id, user.username, false);
+  res.setHeader('Set-Cookie', `to_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`);
+  res.redirect('/');
+});
+
+app.delete('/api/admin/users/:id/history', requireAdmin, async (req, res) => {
+  try { await dbWipeUserHistory(req.params.id); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/admin/scans', requireAdmin, async (req, res) => {
   try { res.json(await dbGetHistory(null, true)); } catch { res.json([]); }
+});
+
+app.get('/api/admin/chart', requireAdmin, async (req, res) => {
+  try { res.json(await dbGetScansByDay()); } catch { res.json([]); }
+});
+
+app.get('/api/admin/announcement', requireAdmin, async (req, res) => {
+  const msg = await dbGetSetting('ANNOUNCEMENT').catch(() => null);
+  res.json({ message: msg || '' });
+});
+
+app.post('/api/admin/announcement', requireAdmin, async (req, res) => {
+  const { message } = req.body;
+  if (message) { await dbSetSetting('ANNOUNCEMENT', message); }
+  else { await dbDeleteSetting('ANNOUNCEMENT'); }
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/maintenance', requireAdmin, async (req, res) => {
+  const val = await dbGetSetting('MAINTENANCE_MODE').catch(() => null);
+  res.json({ enabled: val === 'true' });
+});
+
+app.post('/api/admin/maintenance', requireAdmin, async (req, res) => {
+  const { enabled } = req.body;
+  if (enabled) { await dbSetSetting('MAINTENANCE_MODE', 'true'); }
+  else { await dbDeleteSetting('MAINTENANCE_MODE'); }
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/export', requireAdmin, async (req, res) => {
+  try {
+    const [users, scans] = await Promise.all([dbGetAllUsers(), dbGetHistory(null, true)]);
+    res.setHeader('Content-Disposition', `attachment; filename="threatops-export-${Date.now()}.json"`);
+    res.json({ exportedAt: new Date().toISOString(), users, scans });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/admin/api-keys', requireAdmin, (req, res) => {
+  res.json({
+    hibpConfigured: !!(process.env.HIBP_API_KEY && process.env.HIBP_API_KEY !== 'your_hibp_key_here'),
+    abuseConfigured: !!(process.env.ABUSEIPDB_API_KEY && process.env.ABUSEIPDB_API_KEY !== 'your_abuseipdb_key_here'),
+    shodanConfigured: !!(process.env.SHODAN_API_KEY && process.env.SHODAN_API_KEY !== 'your_shodan_key_here'),
+  });
+});
+
+app.post('/api/admin/api-keys', requireAdmin, async (req, res) => {
+  const allowed = ['HIBP_API_KEY', 'ABUSEIPDB_API_KEY', 'SHODAN_API_KEY'];
+  const updates = {};
+  for (const key of allowed) {
+    if (req.body[key] !== undefined && req.body[key] !== '') { updates[key] = req.body[key]; process.env[key] = req.body[key]; }
+  }
+  await dbSaveSettings(updates).catch(() => {});
+  res.json({ ok: true });
+});
+
+// ─── ANNOUNCEMENT FOR DASHBOARD ───────────────────────────────────────────────
+app.get('/api/announcement', requireAuth, async (req, res) => {
+  const msg = await dbGetSetting('ANNOUNCEMENT').catch(() => null);
+  res.json({ message: msg || null });
 });
 
 // ─── SHARE ────────────────────────────────────────────────────────────────────
@@ -612,7 +798,6 @@ ${findings.length ? `<div class="sl">Intelligence Findings</div>${findingsHtml}`
 
 // ─── ADMIN PAGE ───────────────────────────────────────────────────────────────
 app.get('/admin', requireAdmin, (req, res) => {
-  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -621,99 +806,323 @@ app.get('/admin', requireAdmin, (req, res) => {
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#050507;color:#e0e0e8;font-family:'JetBrains Mono',monospace;font-size:12px;}
-.topbar{background:#0a0a0e;border-bottom:2px solid #ff2a2a;padding:0 20px;height:48px;display:flex;align-items:center;gap:12px;}
+body{background:#050507;color:#e0e0e8;font-family:'JetBrains Mono',monospace;font-size:12px;min-height:100vh;}
+.topbar{background:#0a0a0e;border-bottom:2px solid #ff2a2a;padding:0 20px;height:48px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:50;}
 .logo{font-family:'Share Tech Mono',monospace;font-size:17px;color:#ff2a2a;letter-spacing:3px;}
-.badge{background:rgba(255,42,42,.15);color:#ff2a2a;font-size:9px;font-weight:700;letter-spacing:1px;padding:2px 7px;border:1px solid rgba(255,42,42,.3);}
-.ml{margin-left:auto;display:flex;gap:8px;}
-.btn{height:28px;padding:0 12px;background:#0f0f14;border:1px solid #1a1a24;color:#8888a0;font-family:'JetBrains Mono',monospace;font-size:10px;cursor:pointer;text-decoration:none;display:flex;align-items:center;transition:all .15s;}
+.abadge{background:rgba(255,42,42,.15);color:#ff2a2a;font-size:9px;font-weight:700;letter-spacing:1px;padding:2px 7px;border:1px solid rgba(255,42,42,.3);}
+.ml{margin-left:auto;display:flex;gap:8px;align-items:center;}
+.btn{height:28px;padding:0 12px;background:#0f0f14;border:1px solid #1a1a24;color:#8888a0;font-family:'JetBrains Mono',monospace;font-size:10px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;transition:all .15s;}
 .btn:hover{border-color:#00c8ff;color:#00c8ff;}
 .btn-r{background:rgba(255,42,42,.1);border-color:rgba(255,42,42,.3);color:#ff2a2a;}
 .btn-r:hover{background:rgba(255,42,42,.2);}
-.wrap{padding:20px;max-width:1100px;margin:0 auto;}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:20px;}
+.btn-g{background:rgba(0,230,118,.1);border-color:rgba(0,230,118,.3);color:#00e676;}
+.btn-g:hover{background:rgba(0,230,118,.2);}
+.btn-y{background:rgba(245,158,11,.1);border-color:rgba(245,158,11,.3);color:#f59e0b;}
+.btn-y:hover{background:rgba(245,158,11,.2);}
+.tabs{display:flex;gap:0;border-bottom:1px solid #1a1a24;background:#0a0a0e;padding:0 20px;}
+.tab{padding:10px 18px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#444458;cursor:pointer;border-bottom:2px solid transparent;transition:all .15s;}
+.tab.active{color:#ff2a2a;border-bottom-color:#ff2a2a;}
+.tab-pane{display:none;padding:20px;max-width:1200px;margin:0 auto;}
+.tab-pane.active{display:block;}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:20px;}
 .stat{background:#0a0a0e;border:1px solid #1a1a24;padding:14px 16px;}
-.stat-n{font-size:24px;font-weight:700;color:#e0e0e8;margin-bottom:3px;}
-.stat-l{font-size:9.5px;color:#444458;letter-spacing:1px;text-transform:uppercase;}
+.stat-n{font-size:26px;font-weight:700;color:#e0e0e8;margin-bottom:3px;}
+.stat-l{font-size:9px;color:#444458;letter-spacing:1.5px;text-transform:uppercase;}
 .section{background:#0a0a0e;border:1px solid #1a1a24;margin-bottom:14px;}
-.sec-hdr{padding:10px 14px;border-bottom:1px solid #1a1a24;font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#8888a0;}
+.sec-hdr{padding:10px 14px;border-bottom:1px solid #1a1a24;font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#8888a0;display:flex;align-items:center;gap:10px;}
 table{width:100%;border-collapse:collapse;}
-td,th{padding:8px 14px;text-align:left;border-bottom:1px solid #1a1a24;font-size:10.5px;}
-th{font-size:9.5px;color:#444458;letter-spacing:1px;text-transform:uppercase;font-weight:600;}
+td,th{padding:8px 14px;text-align:left;border-bottom:1px solid #0f0f14;font-size:10.5px;}
+th{font-size:9px;color:#444458;letter-spacing:1px;text-transform:uppercase;font-weight:600;border-bottom:1px solid #1a1a24;}
 tr:last-child td{border-bottom:none;}
 tr:hover td{background:rgba(255,255,255,.02);}
 .tag{padding:1px 6px;font-size:8.5px;font-weight:700;letter-spacing:.5px;}
-.t-r{background:rgba(255,42,42,.1);color:#ff2a2a;border:1px solid rgba(255,42,42,.3);}
-.t-c{background:rgba(0,200,255,.1);color:#00c8ff;border:1px solid rgba(0,200,255,.3);}
-.del-btn{padding:2px 8px;background:rgba(255,42,42,.1);border:1px solid rgba(255,42,42,.2);color:#ff6b6b;font-size:9.5px;cursor:pointer;font-family:'JetBrains Mono',monospace;}
-.del-btn:hover{background:rgba(255,42,42,.2);}
-#toast{position:fixed;bottom:20px;right:20px;background:#0a0a0e;border:1px solid #1a1a24;border-left:3px solid #00e676;color:#00e676;padding:8px 14px;font-size:10.5px;display:none;}
+.t-r{background:rgba(255,42,42,.1);color:#ff2a2a;border:1px solid rgba(255,42,42,.25);}
+.t-c{background:rgba(0,200,255,.1);color:#00c8ff;border:1px solid rgba(0,200,255,.25);}
+.t-g{background:rgba(0,230,118,.1);color:#00e676;border:1px solid rgba(0,230,118,.25);}
+.t-y{background:rgba(245,158,11,.1);color:#f59e0b;border:1px solid rgba(245,158,11,.25);}
+.act-btns{display:flex;gap:4px;flex-wrap:wrap;}
+.ab{padding:2px 7px;font-size:9px;cursor:pointer;font-family:'JetBrains Mono',monospace;border:1px solid;transition:all .15s;}
+.ab-r{background:rgba(255,42,42,.08);border-color:rgba(255,42,42,.25);color:#ff6b6b;}
+.ab-r:hover{background:rgba(255,42,42,.2);}
+.ab-c{background:rgba(0,200,255,.08);border-color:rgba(0,200,255,.25);color:#00c8ff;}
+.ab-c:hover{background:rgba(0,200,255,.18);}
+.ab-y{background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.25);color:#f59e0b;}
+.ab-y:hover{background:rgba(245,158,11,.18);}
+.ab-g{background:rgba(0,230,118,.08);border-color:rgba(0,230,118,.25);color:#00e676;}
+.ab-g:hover{background:rgba(0,230,118,.18);}
+.ab-p{background:rgba(168,85,247,.08);border-color:rgba(168,85,247,.25);color:#a855f7;}
+.ab-p:hover{background:rgba(168,85,247,.18);}
+.inp{padding:7px 10px;background:#0f0f14;border:1px solid #1a1a24;color:#e0e0e8;font-family:'JetBrains Mono',monospace;font-size:11px;outline:none;transition:border-color .15s;width:100%;}
+.inp:focus{border-color:#00c8ff;}
+.inp::placeholder{color:#444458;}
+.field{margin-bottom:12px;}
+.label{font-size:9.5px;font-weight:600;color:#8888a0;letter-spacing:1px;text-transform:uppercase;margin-bottom:5px;display:block;}
+.toggle-wrap{display:flex;align-items:center;gap:12px;padding:12px 14px;}
+.toggle{position:relative;width:36px;height:20px;cursor:pointer;}
+.toggle input{opacity:0;width:0;height:0;}
+.toggle-slider{position:absolute;inset:0;background:#1a1a24;border-radius:20px;transition:.2s;}
+.toggle-slider::before{content:'';position:absolute;width:14px;height:14px;left:3px;top:3px;background:#444458;border-radius:50%;transition:.2s;}
+.toggle input:checked+.toggle-slider{background:rgba(255,42,42,.4);border:1px solid #ff2a2a;}
+.toggle input:checked+.toggle-slider::before{transform:translateX(16px);background:#ff2a2a;}
+.chart-wrap{padding:14px;overflow-x:auto;}
+.key-row{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid #0f0f14;}
+.key-row:last-child{border-bottom:none;}
+#toast{position:fixed;bottom:20px;right:20px;background:#0a0a0e;border:1px solid #1a1a24;border-left:3px solid #00e676;color:#00e676;padding:9px 16px;font-size:10.5px;display:none;z-index:999;max-width:360px;}
+#toast.err{border-left-color:#ff2a2a;color:#ff6b6b;}
 </style>
 </head>
 <body>
 <div class="topbar">
   <div class="logo">⚔ THREATOPS</div>
-  <span class="badge">ADMIN</span>
+  <span class="abadge">ADMIN</span>
   <div class="ml">
+    <a href="/api/admin/export" class="btn" download>⬇ Export</a>
     <a href="/" class="btn">← Dashboard</a>
     <a href="/api/logout" class="btn btn-r">Logout</a>
   </div>
 </div>
-<div class="wrap">
-  <div class="stats" id="stats">
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('overview')">Overview</div>
+  <div class="tab" onclick="switchTab('users')">Users</div>
+  <div class="tab" onclick="switchTab('scans')">Scans</div>
+  <div class="tab" onclick="switchTab('settings')">Settings</div>
+</div>
+
+<!-- OVERVIEW TAB -->
+<div class="tab-pane active" id="tab-overview">
+  <div class="stats">
     <div class="stat"><div class="stat-n" id="st-users">—</div><div class="stat-l">Total Users</div></div>
     <div class="stat"><div class="stat-n" id="st-scans">—</div><div class="stat-l">Total Scans</div></div>
+    <div class="stat"><div class="stat-n" id="st-today">—</div><div class="stat-l">Scans Today</div></div>
   </div>
   <div class="section">
-    <div class="sec-hdr">Users</div>
-    <table><thead><tr><th>Username</th><th>Joined</th><th>Role</th><th></th></tr></thead>
-    <tbody id="users-tbody"><tr><td colspan="4" style="color:#444458;">Loading...</td></tr></tbody></table>
+    <div class="sec-hdr">Scans per Day (last 14 days)</div>
+    <div class="chart-wrap"><svg id="chart" height="80" style="min-width:100%;"></svg></div>
   </div>
   <div class="section">
-    <div class="sec-hdr">Recent Scans (all users)</div>
-    <table><thead><tr><th>Target</th><th>User</th><th>Time</th><th>Findings</th></tr></thead>
-    <tbody id="scans-tbody"><tr><td colspan="4" style="color:#444458;">Loading...</td></tr></tbody></table>
+    <div class="sec-hdr">Announcement Banner
+      <span style="font-size:9px;color:#444458;font-weight:400;">Shown to all users on the dashboard</span>
+    </div>
+    <div style="padding:14px;display:flex;gap:8px;">
+      <input type="text" id="announce-input" class="inp" placeholder="Enter announcement message, or leave blank to clear..." style="flex:1;">
+      <button class="btn btn-g" onclick="saveAnnouncement()">Save</button>
+    </div>
+  </div>
+  <div class="section">
+    <div class="sec-hdr">Maintenance Mode</div>
+    <div class="toggle-wrap">
+      <label class="toggle"><input type="checkbox" id="maint-toggle" onchange="toggleMaintenance()"><span class="toggle-slider"></span></label>
+      <div>
+        <div style="font-size:11px;color:#e0e0e8;font-weight:600;">Lock out non-admin users</div>
+        <div style="font-size:9.5px;color:#444458;margin-top:2px;">Users will see a maintenance page until this is turned off</div>
+      </div>
+    </div>
   </div>
 </div>
+
+<!-- USERS TAB -->
+<div class="tab-pane" id="tab-users">
+  <div class="section">
+    <div class="sec-hdr">All Users</div>
+    <table>
+      <thead><tr><th>Username</th><th>Joined</th><th>Role</th><th>Actions</th></tr></thead>
+      <tbody id="users-tbody"><tr><td colspan="4" style="color:#444458;">Loading...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- SCANS TAB -->
+<div class="tab-pane" id="tab-scans">
+  <div class="section">
+    <div class="sec-hdr">All Scans</div>
+    <table>
+      <thead><tr><th>Target</th><th>User</th><th>Time</th><th>Findings</th><th></th></tr></thead>
+      <tbody id="scans-tbody"><tr><td colspan="5" style="color:#444458;">Loading...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- SETTINGS TAB -->
+<div class="tab-pane" id="tab-settings">
+  <div class="section">
+    <div class="sec-hdr">API Keys</div>
+    <div id="key-rows" style="padding:0;">
+      <div class="key-row"><span style="flex:1;color:#8888a0;font-size:10px;">HIBP (Breach Check)</span><span id="hibp-st" class="tag" style="margin-right:10px;"></span><input type="password" class="inp" id="key-hibp" placeholder="Paste to update..." style="width:240px;"></div>
+      <div class="key-row"><span style="flex:1;color:#8888a0;font-size:10px;">AbuseIPDB (IP Reputation)</span><span id="abuse-st" class="tag" style="margin-right:10px;"></span><input type="password" class="inp" id="key-abuse" placeholder="Paste to update..." style="width:240px;"></div>
+      <div class="key-row"><span style="flex:1;color:#8888a0;font-size:10px;">Shodan (CVEs + Banners)</span><span id="shodan-st" class="tag" style="margin-right:10px;"></span><input type="password" class="inp" id="key-shodan" placeholder="Paste to update..." style="width:240px;"></div>
+    </div>
+    <div style="padding:12px 14px;border-top:1px solid #1a1a24;display:flex;gap:8px;justify-content:flex-end;">
+      <span id="keys-msg" style="flex:1;color:#00e676;font-size:10px;padding-top:5px;"></span>
+      <button class="btn btn-g" onclick="saveKeys()">Save API Keys</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 <script>
 const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-function toast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.style.display='block'; setTimeout(()=>t.style.display='none',3000); }
 
-async function load() {
-  const [stats, users, scans] = await Promise.all([
+function toast(msg, err) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = err ? 'err' : '';
+  t.style.display = 'block'; setTimeout(() => t.style.display='none', 3500);
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', ['overview','users','scans','settings'][i]===name));
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id==='tab-'+name));
+  if (name==='users' && !window._usersLoaded) loadUsers();
+  if (name==='scans' && !window._scansLoaded) loadScans();
+  if (name==='settings') loadKeys();
+}
+
+// ── OVERVIEW ────────────────────────────────────────────────────────────────
+async function loadOverview() {
+  const [stats, chart, ann, maint] = await Promise.all([
     fetch('/api/admin/stats').then(r=>r.json()),
-    fetch('/api/admin/users').then(r=>r.json()),
-    fetch('/api/admin/scans').then(r=>r.json()),
+    fetch('/api/admin/chart').then(r=>r.json()),
+    fetch('/api/admin/announcement').then(r=>r.json()),
+    fetch('/api/admin/maintenance').then(r=>r.json()),
   ]);
   document.getElementById('st-users').textContent = stats.userCount;
   document.getElementById('st-scans').textContent = stats.scanCount;
+  const today = new Date().toISOString().slice(0,10);
+  const todayEntry = chart.find(d => d.day === today);
+  document.getElementById('st-today').textContent = todayEntry ? todayEntry.count : 0;
+  renderChart(chart);
+  if (ann.message) document.getElementById('announce-input').value = ann.message;
+  document.getElementById('maint-toggle').checked = maint.enabled;
+}
 
-  const utb = document.getElementById('users-tbody');
-  utb.innerHTML = users.length ? users.map(u => \`<tr>
+function renderChart(data) {
+  const svg = document.getElementById('chart');
+  if (!data.length) { svg.innerHTML = '<text x="10" y="40" fill="#444458" font-size="10" font-family="monospace">No scan data yet</text>'; return; }
+  const max = Math.max(...data.map(d=>d.count), 1);
+  const w = Math.max(600, data.length * 40);
+  svg.setAttribute('width', w);
+  const bw = 28, gap = (w - data.length*bw) / (data.length+1);
+  let html = '';
+  data.forEach((d, i) => {
+    const x = gap + i*(bw+gap);
+    const bh = Math.round((d.count/max)*56);
+    const y = 70 - bh;
+    html += \`<rect x="\${x}" y="\${y}" width="\${bw}" height="\${bh}" fill="rgba(255,42,42,0.5)" rx="1"/>\`;
+    html += \`<text x="\${x+bw/2}" y="\${y-3}" text-anchor="middle" fill="#8888a0" font-size="9" font-family="monospace">\${d.count}</text>\`;
+    html += \`<text x="\${x+bw/2}" y="78" text-anchor="middle" fill="#444458" font-size="8" font-family="monospace">\${d.day.slice(5)}</text>\`;
+  });
+  svg.innerHTML = html;
+}
+
+async function saveAnnouncement() {
+  const msg = document.getElementById('announce-input').value.trim();
+  const r = await fetch('/api/admin/announcement', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message:msg}) });
+  if (r.ok) toast(msg ? 'Announcement saved' : 'Announcement cleared');
+  else toast('Error saving', true);
+}
+
+async function toggleMaintenance() {
+  const enabled = document.getElementById('maint-toggle').checked;
+  const r = await fetch('/api/admin/maintenance', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled}) });
+  if (r.ok) toast(enabled ? 'Maintenance mode ON' : 'Maintenance mode OFF', enabled);
+  else { toast('Error', true); document.getElementById('maint-toggle').checked = !enabled; }
+}
+
+// ── USERS ────────────────────────────────────────────────────────────────────
+async function loadUsers() {
+  window._usersLoaded = true;
+  const users = await fetch('/api/admin/users').then(r=>r.json());
+  const tb = document.getElementById('users-tbody');
+  tb.innerHTML = users.length ? users.map(u => \`<tr>
     <td style="font-weight:600;color:#e0e0e8;">\${esc(u.username)}</td>
-    <td style="color:#8888a0;">\${new Date(u.createdAt).toLocaleDateString()}</td>
+    <td style="color:#8888a0;font-size:10px;">\${new Date(u.createdAt).toLocaleDateString()}</td>
     <td>\${u.isAdmin ? '<span class="tag t-r">ADMIN</span>' : '<span class="tag t-c">USER</span>'}</td>
-    <td>\${u.isAdmin ? '' : \`<button class="del-btn" onclick="deleteUser('\${esc(u.id)}', '\${esc(u.username)}')">Delete</button>\`}</td>
+    <td><div class="act-btns">
+      \${!u.isAdmin ? \`<a href="/api/admin/users/\${u.id}/impersonate" class="ab ab-p" target="_blank">Impersonate</a>\` : ''}
+      <button class="ab ab-y" onclick="promptResetPw('\${u.id}','\${esc(u.username)}')">Reset PW</button>
+      <button class="ab ab-c" onclick="toggleAdmin('\${u.id}','\${esc(u.username)}',\${u.isAdmin})">\${u.isAdmin?'Demote':'Promote'}</button>
+      <button class="ab ab-y" onclick="wipeHistory('\${u.id}','\${esc(u.username)}')">Wipe Scans</button>
+      \${!u.isAdmin ? \`<button class="ab ab-r" onclick="deleteUser('\${u.id}','\${esc(u.username)}')">Delete</button>\` : ''}
+    </div></td>
   </tr>\`).join('') : '<tr><td colspan="4" style="color:#444458;">No users</td></tr>';
+}
 
-  const stb = document.getElementById('scans-tbody');
-  stb.innerHTML = scans.length ? scans.slice(0,50).map(s => \`<tr>
-    <td style="color:#e0e0e8;">\${esc(s.target)}</td>
-    <td style="color:#8888a0;">\${esc(s.userId||'—')}</td>
-    <td style="color:#8888a0;">\${new Date(s.ts).toLocaleString()}</td>
-    <td>\${s.high ? \`<span class="tag t-r" style="margin-right:3px;">\${s.high}H</span>\` : ''}\${s.medium ? \`<span style="color:#f59e0b;font-size:9.5px;">\${s.medium}M</span>\` : ''}</td>
-  </tr>\`).join('') : '<tr><td colspan="4" style="color:#444458;">No scans yet</td></tr>';
+async function toggleAdmin(id, username, isAdmin) {
+  if (!confirm(\`\${isAdmin?'Remove admin from':'Make admin'}: \${username}?\`)) return;
+  const r = await fetch(\`/api/admin/users/\${id}/promote\`, {method:'POST'});
+  if (r.ok) { toast(\`\${username} \${isAdmin?'demoted':'promoted'}\`); loadUsers(); }
+  else toast('Error', true);
+}
+
+async function promptResetPw(id, username) {
+  const pw = prompt(\`New password for \${username} (min 8 chars):\`);
+  if (!pw) return;
+  if (pw.length < 8) { toast('Password too short', true); return; }
+  const r = await fetch(\`/api/admin/users/\${id}/reset-password\`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
+  if (r.ok) toast(\`Password reset for \${username}\`);
+  else { const d=await r.json(); toast(d.error, true); }
+}
+
+async function wipeHistory(id, username) {
+  if (!confirm(\`Delete ALL scans for \${username}? This cannot be undone.\`)) return;
+  const r = await fetch(\`/api/admin/users/\${id}/history\`, {method:'DELETE'});
+  if (r.ok) toast(\`Scan history wiped for \${username}\`);
+  else toast('Error', true);
 }
 
 async function deleteUser(id, username) {
-  if (!confirm('Delete user ' + username + ' and all their scans?')) return;
-  const r = await fetch('/api/admin/users/' + id, { method: 'DELETE' });
-  if (r.ok) { toast('User deleted'); load(); }
-  else { const d = await r.json(); alert(d.error); }
+  if (!confirm(\`Delete user \${username} and all their scans? Cannot be undone.\`)) return;
+  const r = await fetch(\`/api/admin/users/\${id}\`, {method:'DELETE'});
+  if (r.ok) { toast(\`\${username} deleted\`); loadUsers(); }
+  else { const d=await r.json(); toast(d.error, true); }
 }
 
-load();
+// ── SCANS ────────────────────────────────────────────────────────────────────
+async function loadScans() {
+  window._scansLoaded = true;
+  const scans = await fetch('/api/admin/scans').then(r=>r.json());
+  const tb = document.getElementById('scans-tbody');
+  tb.innerHTML = scans.length ? scans.slice(0,100).map(s => \`<tr>
+    <td style="color:#e0e0e8;font-weight:600;">\${esc(s.target)}</td>
+    <td style="color:#8888a0;font-size:10px;">\${esc(s.userId||'—')}</td>
+    <td style="color:#8888a0;font-size:10px;">\${new Date(s.ts).toLocaleString()}</td>
+    <td>\${s.high?\`<span class="tag t-r" style="margin-right:3px;">\${s.high}H</span>\`:''}
+        \${s.medium?\`<span class="tag t-y" style="margin-right:3px;">\${s.medium}M</span>\`:''}
+        \${s.low?\`<span class="tag t-c">\${s.low}L</span>\`:''}</td>
+    <td><button class="ab ab-r" onclick="deleteScan('\${s.id}', this)">Del</button></td>
+  </tr>\`).join('') : '<tr><td colspan="5" style="color:#444458;">No scans yet</td></tr>';
+}
+
+async function deleteScan(id, btn) {
+  if (!confirm('Delete this scan?')) return;
+  const r = await fetch(\`/api/history/\${id}\`, {method:'DELETE'});
+  if (r.ok) { btn.closest('tr').remove(); toast('Scan deleted'); }
+  else toast('Error', true);
+}
+
+// ── SETTINGS ─────────────────────────────────────────────────────────────────
+async function loadKeys() {
+  const d = await fetch('/api/admin/api-keys').then(r=>r.json());
+  const badge = (ok) => ok ? '<span class="tag t-g">✓ SET</span>' : '<span class="tag t-r">NOT SET</span>';
+  document.getElementById('hibp-st').outerHTML = badge(d.hibpConfigured).replace('class="tag', 'id="hibp-st" class="tag');
+  document.getElementById('abuse-st').outerHTML = badge(d.abuseConfigured).replace('class="tag', 'id="abuse-st" class="tag');
+  document.getElementById('shodan-st').outerHTML = badge(d.shodanConfigured).replace('class="tag', 'id="shodan-st" class="tag');
+}
+
+async function saveKeys() {
+  const body = {};
+  const h = document.getElementById('key-hibp').value.trim();
+  const a = document.getElementById('key-abuse').value.trim();
+  const s = document.getElementById('key-shodan').value.trim();
+  if (h) body.HIBP_API_KEY = h;
+  if (a) body.ABUSEIPDB_API_KEY = a;
+  if (s) body.SHODAN_API_KEY = s;
+  if (!Object.keys(body).length) { document.getElementById('keys-msg').textContent = 'Nothing to save.'; return; }
+  const r = await fetch('/api/admin/api-keys', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if (r.ok) { toast('Keys saved'); document.getElementById('keys-msg').textContent = ''; loadKeys(); document.getElementById('key-hibp').value=''; document.getElementById('key-abuse').value=''; document.getElementById('key-shodan').value=''; }
+  else toast('Error saving keys', true);
+}
+
+loadOverview();
 </script>
 </body></html>`);
 });

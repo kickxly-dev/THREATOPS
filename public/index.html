@@ -191,6 +191,7 @@
     .h-empty { color: var(--text3); font-size: 10.5px; padding: 16px; text-align: center; }
     #share-toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--bg2); border: 1px solid var(--border); border-left: 3px solid var(--cyan); color: var(--cyan); padding: 9px 16px; font-size: 10.5px; z-index: 500; display: none; white-space: nowrap; }
     #username-tag { font-size: 9.5px; color: var(--text3); white-space: nowrap; }
+    #announcement-bar { display: none; background: var(--yellow-dim); border-bottom: 1px solid var(--yellow); color: var(--yellow); padding: 6px 16px; font-size: 10.5px; text-align: center; flex-shrink: 0; }
 
     /* ── SHODAN SERVICE ── */
     .svc-row { padding: 3px 6px; margin-bottom: 2px; background: rgba(255,255,255,0.02); border-left: 2px solid var(--border2); }
@@ -221,6 +222,9 @@
       <div id="clock"></div>
     </div>
   </div>
+
+  <!-- ANNOUNCEMENT BANNER -->
+  <div id="announcement-bar"></div>
 
   <!-- STATUS STRIP -->
   <div id="statusstrip">
@@ -1018,6 +1022,18 @@
         el('logout-btn').style.display = '';
         el('username-tag').textContent = user.username;
         if (user.isAdmin) el('admin-btn').style.display = '';
+        // Show announcement banner if active
+        try {
+          const ar = await fetch('/api/announcement');
+          if (ar.ok) {
+            const { message } = await ar.json();
+            if (message) {
+              const bar = el('announcement-bar');
+              bar.textContent = '📢 ' + message;
+              bar.style.display = 'block';
+            }
+          }
+        } catch {}
         if (!user.onboarded) {
           // Pre-fetch key status for onboarding step 2
           try {

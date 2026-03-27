@@ -1,782 +1,991 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>THREATOPS</title>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Share+Tech+Mono&family=Bebas+Neue&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #050507; --bg2: #0a0a0e; --bg3: #0f0f14;
+      --border: #1a1a24; --border2: #242432;
+      --red: #ff2a2a; --red-dim: rgba(255,42,42,0.1);
+      --cyan: #00c8ff; --cyan-dim: rgba(0,200,255,0.1);
+      --green: #00e676; --green-dim: rgba(0,230,118,0.1);
+      --yellow: #f59e0b; --yellow-dim: rgba(245,158,11,0.1);
+      --purple: #a855f7; --purple-dim: rgba(168,85,247,0.1);
+      --text: #e0e0e8; --text2: #8888a0; --text3: #444458;
+      --shadow: rgba(0,0,0,0.5);
+    }
+    [data-theme="light"] {
+      --bg: #f0f2f5; --bg2: #ffffff; --bg3: #f8f9fb;
+      --border: #dde1ea; --border2: #c8cedc;
+      --text: #1a1c2e; --text2: #565872; --text3: #9196b0;
+      --shadow: rgba(0,0,0,0.15);
     }
 
-    html, body {
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-      font-family: 'JetBrains Mono', monospace;
-      background: #060608;
-      color: #e0e0e0;
-    }
+    html, body { width: 100%; height: 100%; overflow: hidden; font-family: 'JetBrains Mono', monospace; background: var(--bg); color: var(--text); font-size: 12px; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--red); }
 
-    /* Minimal scanlines - very subtle */
-    body::before {
-      content: '';
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      background: repeating-linear-gradient(
-        0deg,
-        rgba(0, 0, 0, 0.008),
-        rgba(0, 0, 0, 0.008) 1px,
-        transparent 1px,
-        transparent 2px
-      );
-      pointer-events: none;
-      z-index: 999;
-    }
+    /* ── LAYOUT ── */
+    #app { display: flex; flex-direction: column; width: 100%; height: 100%; }
 
-    #container {
-      display: flex;
-      width: 100%;
-      height: 100%;
-      flex-direction: column;
-    }
-
-    /* Top bar */
+    /* ── TOPBAR ── */
     #topbar {
-      background: #0a0a0d;
-      border-bottom: 2px solid #ff2a2a;
-      padding: 12px 20px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-shrink: 0;
+      background: var(--bg2); border-bottom: 1px solid var(--border);
+      padding: 0 14px; height: 48px; display: flex; align-items: center; gap: 10px;
+      flex-shrink: 0; position: relative;
     }
+    #topbar::after {
+      content: ''; position: absolute; bottom: -2px; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, var(--red) 0%, transparent 50%);
+    }
+    #logo { font-family: 'Share Tech Mono', monospace; font-size: 17px; font-weight: 700; color: var(--red); letter-spacing: 3px; white-space: nowrap; flex-shrink: 0; }
+    #logo span { color: var(--text3); }
+    #input-group { display: flex; gap: 6px; flex: 1; max-width: 680px; }
+    .inp { flex: 1; height: 30px; padding: 0 10px; background: var(--bg3); border: 1px solid var(--border2); color: var(--text); font-family: 'JetBrains Mono', monospace; font-size: 11px; outline: none; transition: border-color 0.15s; }
+    .inp:focus { border-color: var(--cyan); }
+    .inp::placeholder { color: var(--text3); }
+    #email-input { flex: 0.65; }
+    #scan-btn { height: 30px; padding: 0 16px; background: var(--red); border: none; color: #fff; font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; cursor: pointer; transition: background 0.15s, box-shadow 0.15s; flex-shrink: 0; }
+    #scan-btn:hover:not(:disabled) { background: #ff4444; box-shadow: 0 0 14px rgba(255,42,42,0.35); }
+    #scan-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .icon-btn { height: 30px; width: 30px; background: var(--bg3); border: 1px solid var(--border2); color: var(--text2); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 13px; transition: all 0.15s; flex-shrink: 0; }
+    .icon-btn:hover { border-color: var(--cyan); color: var(--cyan); }
+    #topbar-right { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+    #clock { font-family: 'Share Tech Mono', monospace; font-size: 11px; color: var(--text2); white-space: nowrap; }
 
-    #logo {
-      font-family: 'Bebas Neue', sans-serif;
-      font-size: 24px;
-      font-weight: bold;
-      color: #ff2a2a;
-      letter-spacing: 2px;
-    }
+    /* ── STATUS STRIP ── */
+    #statusstrip { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 5px 14px; display: flex; align-items: center; gap: 3px; flex-shrink: 0; flex-wrap: nowrap; overflow-x: auto; }
+    .mod-ind { display: flex; align-items: center; gap: 4px; padding: 2px 7px; border: 1px solid var(--border); font-size: 9.5px; color: var(--text3); white-space: nowrap; transition: all 0.2s; }
+    .mod-ind .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--text3); flex-shrink: 0; transition: background 0.2s; }
+    .mod-ind.scanning { color: var(--cyan); border-color: rgba(0,200,255,0.3); }
+    .mod-ind.scanning .dot { background: var(--cyan); animation: blink 0.8s ease-in-out infinite; }
+    .mod-ind.done { color: var(--green); border-color: rgba(0,230,118,0.25); }
+    .mod-ind.done .dot { background: var(--green); }
+    .mod-ind.error { color: var(--red); border-color: rgba(255,42,42,0.3); }
+    .mod-ind.error .dot { background: var(--red); }
+    @keyframes blink { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.3;transform:scale(0.6)} }
+    #findings-bar { display: flex; align-items: center; gap: 4px; margin-left: auto; padding-left: 8px; flex-shrink: 0; }
+    .fcnt { padding: 2px 7px; font-size: 9.5px; font-weight: 700; display: none; }
+    .fcnt-h { background: var(--red-dim); color: var(--red); border: 1px solid rgba(255,42,42,0.3); }
+    .fcnt-m { background: var(--yellow-dim); color: var(--yellow); border: 1px solid rgba(245,158,11,0.3); }
+    .fcnt-l { background: var(--cyan-dim); color: var(--cyan); border: 1px solid rgba(0,200,255,0.3); }
+    .fcnt-i { background: rgba(255,255,255,0.04); color: var(--text2); border: 1px solid var(--border2); }
 
-    #clock {
-      font-family: 'Share Tech Mono', monospace;
-      font-size: 13px;
-      color: #ff2a2a;
-      font-weight: 600;
-    }
+    /* ── BODY ── */
+    #body { display: flex; flex: 1; overflow: hidden; }
 
-    /* Main content area */
-    #content {
-      display: flex;
-      flex: 1;
-      overflow: hidden;
-    }
+    /* ── GRID ── */
+    #grid-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); }
+    #grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; padding: 7px; flex: 1; overflow-y: auto; }
 
-    /* Left nav */
-    #nav {
-      width: 200px;
-      background: #0f0f12;
-      border-right: 1px solid #1a1a1f;
-      padding: 15px;
-      overflow-y: auto;
-      flex-shrink: 0;
-    }
+    /* ── MODULE ── */
+    .module { background: var(--bg2); border: 1px solid var(--border); border-top: 2px solid var(--border2); display: flex; flex-direction: column; min-height: 155px; transition: border-top-color 0.3s; }
+    .module.scanning { border-top-color: var(--cyan); }
+    .module.done { border-top-color: var(--green); }
+    .module.error { border-top-color: var(--red); }
+    .module-hdr { display: flex; align-items: center; justify-content: space-between; padding: 7px 9px 6px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+    .module-title { font-size: 9.5px; font-weight: 600; letter-spacing: 1.2px; text-transform: uppercase; color: var(--text2); }
+    .mbadge { font-size: 8.5px; font-weight: 700; letter-spacing: 0.8px; padding: 1px 5px; text-transform: uppercase; }
+    .mbadge-idle { color: var(--text3); }
+    .mbadge-scanning { color: var(--cyan); animation: blink 1s ease-in-out infinite; }
+    .mbadge-done { color: var(--green); }
+    .mbadge-error { color: var(--red); }
+    .mc { flex: 1; padding: 7px 9px; overflow-y: auto; font-size: 10.5px; line-height: 1.6; }
 
-    .nav-section {
-      margin-bottom: 20px;
-    }
+    /* ── DATA ELEMENTS ── */
+    .dr { display: flex; align-items: baseline; gap: 6px; margin-bottom: 4px; padding: 3px 6px; background: rgba(255,255,255,0.02); border-left: 2px solid var(--border2); }
+    .dr:hover { background: rgba(255,255,255,0.04); }
+    .dl { color: var(--text2); font-weight: 600; font-size: 9.5px; white-space: nowrap; flex-shrink: 0; }
+    .dv { color: var(--text); word-break: break-all; }
+    .sl { color: var(--cyan); font-size: 9px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; margin: 7px 0 3px; border-bottom: 1px solid rgba(0,200,255,0.12); padding-bottom: 2px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 3px; margin: 3px 0; }
+    .chip { padding: 2px 6px; font-size: 9.5px; font-weight: 600; border-radius: 2px; white-space: nowrap; }
+    .chip-open { background: var(--green-dim); color: var(--green); border: 1px solid rgba(0,230,118,0.3); }
+    .chip-closed { background: rgba(255,255,255,0.02); color: var(--text3); border: 1px solid var(--border); }
+    .chip-filt { background: var(--yellow-dim); color: var(--yellow); border: 1px solid rgba(245,158,11,0.25); }
+    .badge-row { display: flex; flex-wrap: wrap; gap: 3px; margin: 3px 0; }
+    .tag { padding: 2px 6px; font-size: 9px; font-weight: 600; border-radius: 2px; white-space: nowrap; }
+    .t-c { background: var(--cyan-dim); color: var(--cyan); border: 1px solid rgba(0,200,255,0.2); }
+    .t-g { background: var(--green-dim); color: var(--green); border: 1px solid rgba(0,230,118,0.2); }
+    .t-r { background: var(--red-dim); color: var(--red); border: 1px solid rgba(255,42,42,0.2); }
+    .t-y { background: var(--yellow-dim); color: var(--yellow); border: 1px solid rgba(245,158,11,0.2); }
+    .t-p { background: var(--purple-dim); color: var(--purple); border: 1px solid rgba(168,85,247,0.2); }
+    .t-x { background: rgba(255,255,255,0.04); color: var(--text2); border: 1px solid var(--border2); }
+    .grade-display { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .grade-letter { font-size: 34px; font-weight: 700; line-height: 1; }
+    .g-A{color:var(--green)} .g-B{color:#7dd3fc} .g-C{color:var(--yellow)} .g-D,.g-E{color:#f97316} .g-F{color:var(--red)}
+    .sbar { flex: 1; height: 5px; background: var(--bg3); border-radius: 3px; overflow: hidden; }
+    .sfill { height: 100%; border-radius: 3px; transition: width 0.5s; }
+    .ssl-days { font-size: 22px; font-weight: 700; line-height: 1; }
+    .cert-bar { height: 4px; background: var(--bg3); border-radius: 2px; overflow: hidden; margin: 4px 0; }
+    .cfill { height: 100%; border-radius: 2px; }
+    .tech-item { display: flex; align-items: center; justify-content: space-between; padding: 3px 6px; margin-bottom: 2px; background: rgba(255,255,255,0.02); border-left: 2px solid var(--border2); }
+    .ec { display: flex; align-items: center; gap: 8px; padding: 4px 6px; margin-bottom: 3px; background: rgba(255,255,255,0.02); }
+    .sub-row { display: flex; align-items: baseline; justify-content: space-between; padding: 3px 6px; margin-bottom: 2px; background: rgba(255,255,255,0.02); border-left: 2px solid var(--border2); }
+    .sub-row.live { border-left-color: var(--green); }
+    .breach-item { padding: 3px 6px; margin-bottom: 2px; background: var(--red-dim); border-left: 2px solid var(--red); }
+    .empty { color: var(--text3); font-style: italic; font-size: 10px; padding: 4px 0; }
+    .err-text { color: var(--red); font-size: 10.5px; }
+    .loader { display: flex; align-items: center; gap: 8px; color: var(--text3); padding: 6px 0; }
+    .spin { width: 9px; height: 9px; border: 2px solid var(--border2); border-top-color: var(--cyan); border-radius: 50%; animation: spin 0.6s linear infinite; flex-shrink: 0; }
+    @keyframes spin { to{transform:rotate(360deg)} }
+    .score-big { font-size: 26px; font-weight: 700; line-height: 1; }
 
-    .nav-title {
-      font-size: 11px;
-      text-transform: uppercase;
-      color: #ff2a2a;
-      font-weight: 600;
-      letter-spacing: 1px;
-      margin-bottom: 8px;
-      border-bottom: 1px solid #1a1a1f;
-      padding-bottom: 4px;
-    }
+    /* ── RIGHT PANEL ── */
+    #right { width: 330px; flex-shrink: 0; background: var(--bg2); display: flex; flex-direction: column; }
+    #right-hdr { padding: 9px 11px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+    #right-title { font-size: 9.5px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text2); }
+    #feed-filter { display: flex; gap: 3px; }
+    .fbtn { padding: 2px 6px; font-size: 8.5px; font-weight: 700; border: 1px solid var(--border2); background: transparent; color: var(--text3); cursor: pointer; font-family: 'JetBrains Mono', monospace; transition: all 0.15s; letter-spacing: 0.5px; }
+    .fbtn.active { background: var(--red); border-color: var(--red); color: #fff; }
+    .fbtn:hover:not(.active) { border-color: var(--text2); color: var(--text2); }
+    #feed { flex: 1; overflow-y: auto; padding: 7px; }
+    .finding { padding: 7px 9px; margin-bottom: 5px; border-left: 3px solid var(--border2); background: rgba(255,255,255,0.02); cursor: default; transition: background 0.1s; }
+    .finding:hover { background: rgba(255,255,255,0.04); }
+    .finding.high { border-left-color: var(--red); background: rgba(255,42,42,0.04); }
+    .finding.medium { border-left-color: var(--yellow); background: rgba(245,158,11,0.04); }
+    .finding.low { border-left-color: var(--cyan); background: rgba(0,200,255,0.04); }
+    .finding.info { border-left-color: var(--text3); }
+    .fmeta { display: flex; align-items: center; gap: 5px; margin-bottom: 3px; }
+    .sev { font-size: 8.5px; font-weight: 700; letter-spacing: 0.5px; padding: 1px 4px; text-transform: uppercase; }
+    .s-high { background: var(--red); color: #fff; }
+    .s-medium { background: var(--yellow); color: #000; }
+    .s-low { background: var(--cyan); color: #000; }
+    .s-info { background: var(--text3); color: #fff; }
+    .fmod { font-size: 9px; color: var(--text3); font-weight: 500; }
+    .ftitle { font-size: 10.5px; font-weight: 600; color: var(--text); margin-bottom: 1px; }
+    .fdetail { font-size: 9.5px; color: var(--text2); line-height: 1.5; }
 
-    .nav-item {
-      font-size: 12px;
-      padding: 6px 8px;
-      margin: 4px 0;
-      cursor: pointer;
-      color: #888;
-      transition: all 0.2s;
-      border-left: 2px solid transparent;
-      padding-left: 10px;
-    }
+    /* ── TERMINAL ── */
+    #terminal { height: 72px; background: var(--bg); border-top: 1px solid var(--border); padding: 5px 12px; overflow-y: auto; font-size: 9.5px; font-family: 'Share Tech Mono', monospace; color: var(--green); flex-shrink: 0; }
+    .tl { margin: 1px 0; }
+    .tl.err { color: var(--red); }
+    .tl.info { color: var(--cyan); }
+    .tprefix { color: var(--text3); margin-right: 6px; }
 
-    .nav-item:hover {
-      color: #ff2a2a;
-      background: #1a1a1f;
-    }
+    /* ── HISTORY PANEL ── */
+    #history-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; display: none; }
+    #history-drawer { position: fixed; left: 0; top: 0; bottom: 0; width: 380px; background: var(--bg2); border-right: 1px solid var(--border); z-index: 101; display: flex; flex-direction: column; transform: translateX(-100%); transition: transform 0.25s ease; }
+    #history-drawer.open { transform: translateX(0); }
+    #history-hdr { padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+    #history-hdr span { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text2); }
+    #history-close { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 16px; line-height: 1; }
+    #history-close:hover { color: var(--red); }
+    #history-list { flex: 1; overflow-y: auto; padding: 8px; }
+    .h-item { padding: 9px 11px; margin-bottom: 5px; background: var(--bg3); border: 1px solid var(--border); cursor: pointer; transition: all 0.15s; display: flex; align-items: center; gap: 10px; }
+    .h-item:hover { border-color: var(--cyan); }
+    .h-target { font-weight: 600; color: var(--text); font-size: 11px; }
+    .h-ts { font-size: 9px; color: var(--text3); margin-top: 2px; }
+    .h-counts { display: flex; gap: 4px; margin-left: auto; flex-shrink: 0; }
+    .h-del { margin-left: 6px; background: none; border: none; color: var(--text3); cursor: pointer; font-size: 14px; flex-shrink: 0; }
+    .h-del:hover { color: var(--red); }
+    .h-empty { color: var(--text3); font-size: 10.5px; padding: 16px; text-align: center; }
 
-    .nav-item.active {
-      color: #ff2a2a;
-      border-left-color: #ff2a2a;
-      background: #1a1a1f;
-    }
-
-    /* Center column */
-    #center {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      background: #060608;
-      border-right: 1px solid #1a1a1f;
-      overflow: hidden;
-    }
-
-    /* Input area */
-    #inputArea {
-      padding: 15px;
-      border-bottom: 1px solid #1a1a1f;
-      flex-shrink: 0;
-    }
-
-    #inputRow {
-      display: flex;
-      gap: 10px;
-      margin-bottom: 8px;
-    }
-
-    #targetInput, #emailInput {
-      flex: 1;
-      padding: 10px;
-      background: #0f0f12;
-      border: 1px solid #1a1a1f;
-      color: #e0e0e0;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 12px;
-      transition: border 0.2s;
-    }
-
-    #targetInput:focus, #emailInput:focus {
-      outline: none;
-      border-color: #ff2a2a;
-      box-shadow: 0 0 8px rgba(255, 42, 42, 0.3);
-    }
-
-    button {
-      padding: 10px 20px;
-      background: #ff2a2a;
-      border: none;
-      color: #060608;
-      font-family: 'JetBrains Mono', monospace;
-      font-weight: 600;
-      font-size: 12px;
-      cursor: pointer;
-      transition: all 0.2s;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-    }
-
-    button:hover:not(:disabled) {
-      background: #ff4444;
-      box-shadow: 0 0 12px rgba(255, 42, 42, 0.5);
-    }
-
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    #scanStatus {
-      font-size: 11px;
-      color: #888;
-      margin-top: 5px;
-    }
-
-    /* Module grid */
-    #grid {
-      flex: 1;
-      display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: 8px;
-      padding: 8px;
-      overflow-y: auto;
-      background: #060608;
-    }
-
-    .module {
-      background: #0f0f12;
-      border: 1px solid #1a1a1f;
-      border-top: 2px solid #ff2a2a;
-      padding: 12px;
-      overflow-y: auto;
-      max-height: 100%;
-      display: flex;
-      flex-direction: column;
-    }
-
-    .module-title {
-      font-size: 11px;
-      text-transform: uppercase;
-      color: #ff2a2a;
-      font-weight: 600;
-      margin-bottom: 10px;
-      letter-spacing: 1px;
-      border-bottom: 1px solid #1a1a1f;
-      padding-bottom: 6px;
-    }
-
-    .module-content {
-      font-size: 11px;
-      line-height: 1.6;
-      overflow-y: auto;
-      flex: 1;
-    }
-
-    .record {
-      margin-bottom: 8px;
-      padding: 6px;
-      background: #0a0a0d;
-      border-left: 2px solid #ff2a2a;
-      padding-left: 8px;
-    }
-
-    .record-label {
-      color: #ff2a2a;
-      font-weight: 600;
-    }
-
-    .record-value {
-      color: #aaa;
-      word-break: break-all;
-    }
-
-    /* Port chips */
-    .port-chip {
-      display: inline-block;
-      padding: 4px 8px;
-      border-radius: 2px;
-      margin: 2px 2px 2px 0;
-      font-size: 10px;
-      font-weight: 600;
-      text-transform: uppercase;
-    }
-
-    .port-open {
-      background: #1a4d1a;
-      color: #4ade80;
-      border: 1px solid #4ade80;
-    }
-
-    .port-closed {
-      background: #4d1a1a;
-      color: #ff6b6b;
-      border: 1px solid #ff6b6b;
-    }
-
-    .port-filtered {
-      background: #4d3a1a;
-      color: #fbbf24;
-      border: 1px solid #fbbf24;
-    }
-
-    /* Right panel */
-    #right {
-      width: 380px;
-      background: #0f0f12;
-      border-left: 1px solid #1a1a1f;
-      display: flex;
-      flex-direction: column;
-      flex-shrink: 0;
-    }
-
-    #rightTitle {
-      font-size: 11px;
-      text-transform: uppercase;
-      color: #ff2a2a;
-      font-weight: 600;
-      padding: 12px;
-      border-bottom: 1px solid #1a1a1f;
-      letter-spacing: 1px;
-    }
-
-    #feedContainer {
-      flex: 1;
-      overflow-y: auto;
-      padding: 10px;
-    }
-
-    .finding {
-      background: #0a0a0d;
-      border-left: 3px solid #666;
-      padding: 10px;
-      margin-bottom: 8px;
-      border-radius: 2px;
-      font-size: 11px;
-      line-height: 1.5;
-    }
-
-    .finding.high {
-      border-left-color: #ff2a2a;
-      background: rgba(255, 42, 42, 0.05);
-    }
-
-    .finding.medium {
-      border-left-color: #fbbf24;
-      background: rgba(251, 191, 36, 0.05);
-    }
-
-    .finding.low {
-      border-left-color: #60a5fa;
-      background: rgba(96, 165, 250, 0.05);
-    }
-
-    .finding.info {
-      border-left-color: #888;
-      background: rgba(136, 136, 136, 0.05);
-    }
-
-    .finding-severity {
-      display: inline-block;
-      padding: 2px 6px;
-      border-radius: 2px;
-      font-weight: 600;
-      font-size: 10px;
-      text-transform: uppercase;
-      margin-right: 6px;
-    }
-
-    .finding.high .finding-severity {
-      background: #ff2a2a;
-      color: #fff;
-    }
-
-    .finding.medium .finding-severity {
-      background: #fbbf24;
-      color: #000;
-    }
-
-    .finding.low .finding-severity {
-      background: #60a5fa;
-      color: #fff;
-    }
-
-    .finding.info .finding-severity {
-      background: #666;
-      color: #fff;
-    }
-
-    .finding-title {
-      font-weight: 600;
-      color: #e0e0e0;
-      margin: 4px 0;
-    }
-
-    .finding-detail {
-      color: #aaa;
-      font-size: 10px;
-      margin-top: 3px;
-    }
-
-    /* Terminal log */
-    #terminal {
-      height: 120px;
-      background: #0a0a0d;
-      border-top: 1px solid #1a1a1f;
-      padding: 10px;
-      overflow-y: auto;
-      font-size: 10px;
-      font-family: 'Share Tech Mono', monospace;
-      color: #4ade80;
-      flex-shrink: 0;
-    }
-
-    .terminal-line {
-      margin: 2px 0;
-    }
-
-    /* Loading spinner */
-    .spinner {
-      display: inline-block;
-      width: 8px;
-      height: 8px;
-      border: 2px solid #ff2a2a;
-      border-radius: 50%;
-      border-top-color: transparent;
-      animation: spin 0.6s linear infinite;
-      margin-right: 6px;
-    }
-
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-
-    /* Scrollbar styling */
-    ::-webkit-scrollbar {
-      width: 8px;
-    }
-
-    ::-webkit-scrollbar-track {
-      background: #0a0a0d;
-    }
-
-    ::-webkit-scrollbar-thumb {
-      background: #1a1a1f;
-      border-radius: 4px;
-    }
-
-    ::-webkit-scrollbar-thumb:hover {
-      background: #ff2a2a;
-    }
-
-    .error {
-      color: #ff6b6b;
-    }
-
-    .success {
-      color: #4ade80;
-    }
+    /* ── SHODAN SERVICE ── */
+    .svc-row { padding: 3px 6px; margin-bottom: 2px; background: rgba(255,255,255,0.02); border-left: 2px solid var(--border2); }
+    .svc-port { color: var(--cyan); font-weight: 600; margin-right: 6px; }
+    .svc-product { color: var(--text); }
+    .svc-banner { color: var(--text3); font-size: 9px; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   </style>
 </head>
 <body>
-  <div id="container">
-    <div id="topbar">
-      <div id="logo">⚔ THREATOPS</div>
-      <div id="clock"></div>
+<div id="app">
+
+  <!-- TOPBAR -->
+  <div id="topbar">
+    <div id="logo">⚔ THREAT<span>//</span>OPS</div>
+    <div id="input-group">
+      <input type="text" id="target-input" class="inp" placeholder="domain.com  or  1.2.3.4  or  https://target.com" autocomplete="off">
+      <input type="email" id="email-input" class="inp" placeholder="email (breach check)">
+      <button id="scan-btn">SCAN</button>
     </div>
-
-    <div id="content">
-      <!-- Left nav -->
-      <div id="nav">
-        <div class="nav-section">
-          <div class="nav-title">MODULES</div>
-          <div class="nav-item active" data-module="dns">DNS Enumeration</div>
-          <div class="nav-item" data-module="ports">Port Scanner</div>
-          <div class="nav-item" data-module="whois">WHOIS</div>
-          <div class="nav-item" data-module="subdomains">Subdomains</div>
-          <div class="nav-item" data-module="breaches">Breach Check</div>
-          <div class="nav-item" data-module="tech">Tech Stack</div>
-          <div class="nav-item" data-module="headers">Headers Audit</div>
-        </div>
-      </div>
-
-      <!-- Center column -->
-      <div id="center">
-        <!-- Input area -->
-        <div id="inputArea">
-          <div id="inputRow">
-            <input type="text" id="targetInput" placeholder="domain.com or https://domain.com/path" autofocus>
-            <input type="email" id="emailInput" placeholder="email for breach check (optional)">
-            <button id="scanBtn">SCAN</button>
-          </div>
-          <div id="scanStatus"></div>
-        </div>
-
-        <!-- Module grid -->
-        <div id="grid">
-          <div id="module-dns" class="module">
-            <div class="module-title">DNS Records</div>
-            <div class="module-content"></div>
-          </div>
-          <div id="module-ports" class="module">
-            <div class="module-title">Open Ports</div>
-            <div class="module-content"></div>
-          </div>
-          <div id="module-subdomains" class="module">
-            <div class="module-title">Subdomains (Cert Transparency)</div>
-            <div class="module-content"></div>
-          </div>
-          <div id="module-tech" class="module">
-            <div class="module-title">Tech Stack</div>
-            <div class="module-content"></div>
-          </div>
-          <div id="module-whois" class="module">
-            <div class="module-title">WHOIS</div>
-            <div class="module-content"></div>
-          </div>
-          <div id="module-breaches" class="module">
-            <div class="module-title">Breach Check</div>
-            <div class="module-content"></div>
-          </div>
-          <div id="module-headers" class="module">
-            <div class="module-title">Security Headers</div>
-            <div class="module-content"></div>
-          </div>
-        </div>
-
-        <!-- Terminal log -->
-        <div id="terminal"></div>
-      </div>
-
-      <!-- Right panel -->
-      <div id="right">
-        <div id="rightTitle">INTELLIGENCE FEED</div>
-        <div id="feedContainer"></div>
-      </div>
+    <div id="topbar-right">
+      <button class="icon-btn" id="export-btn" title="Export JSON (Ctrl+E)" style="display:none;">⬇</button>
+      <button class="icon-btn" id="history-btn" title="Scan history (Ctrl+H)">◷</button>
+      <button class="icon-btn" id="settings-btn" title="API Keys">⚙</button>
+      <button class="icon-btn" id="theme-btn" title="Toggle theme (Ctrl+T)">◑</button>
+      <button class="icon-btn" id="logout-btn" title="Logout" onclick="location.href='/api/logout'" style="display:none;">⏏</button>
+      <div id="clock"></div>
     </div>
   </div>
 
-  <script>
-    let currentTarget = '';
-    let scanning = false;
+  <!-- STATUS STRIP -->
+  <div id="statusstrip">
+    <div class="mod-ind" id="ind-dns"><div class="dot"></div>DNS</div>
+    <div class="mod-ind" id="ind-ports"><div class="dot"></div>PORTS</div>
+    <div class="mod-ind" id="ind-ssl"><div class="dot"></div>SSL</div>
+    <div class="mod-ind" id="ind-whois"><div class="dot"></div>WHOIS</div>
+    <div class="mod-ind" id="ind-subdomains"><div class="dot"></div>SUBS</div>
+    <div class="mod-ind" id="ind-geoip"><div class="dot"></div>GEO</div>
+    <div class="mod-ind" id="ind-tech"><div class="dot"></div>TECH</div>
+    <div class="mod-ind" id="ind-headers"><div class="dot"></div>HDR</div>
+    <div class="mod-ind" id="ind-waf"><div class="dot"></div>WAF</div>
+    <div class="mod-ind" id="ind-breaches"><div class="dot"></div>BREACH</div>
+    <div class="mod-ind" id="ind-emailSecurity"><div class="dot"></div>EMAIL</div>
+    <div class="mod-ind" id="ind-reverseDNS"><div class="dot"></div>RDNS</div>
+    <div class="mod-ind" id="ind-httpPreview"><div class="dot"></div>PREV</div>
+    <div class="mod-ind" id="ind-abuseipdb"><div class="dot"></div>ABUSE</div>
+    <div class="mod-ind" id="ind-shodan"><div class="dot"></div>SHODAN</div>
+    <div id="findings-bar">
+      <span class="fcnt fcnt-h" id="cnt-h"></span>
+      <span class="fcnt fcnt-m" id="cnt-m"></span>
+      <span class="fcnt fcnt-l" id="cnt-l"></span>
+      <span class="fcnt fcnt-i" id="cnt-i"></span>
+    </div>
+  </div>
 
-    const modules = {
-      dns: document.getElementById('module-dns'),
-      ports: document.getElementById('module-ports'),
-      whois: document.getElementById('module-whois'),
-      subdomains: document.getElementById('module-subdomains'),
-      breaches: document.getElementById('module-breaches'),
-      tech: document.getElementById('module-tech'),
-      headers: document.getElementById('module-headers'),
+  <!-- BODY -->
+  <div id="body">
+    <div id="grid-area">
+      <div id="grid">
+        <!-- Row 1 -->
+        <div class="module" id="mod-dns"><div class="module-hdr"><div class="module-title">DNS Records</div><div class="mbadge mbadge-idle" id="badge-dns">IDLE</div></div><div class="mc" id="content-dns"><div class="empty">Awaiting scan...</div></div></div>
+        <div class="module" id="mod-ports"><div class="module-hdr"><div class="module-title">Port Scanner</div><div class="mbadge mbadge-idle" id="badge-ports">IDLE</div></div><div class="mc" id="content-ports"><div class="empty">Awaiting scan...</div></div></div>
+        <div class="module" id="mod-ssl"><div class="module-hdr"><div class="module-title">SSL / TLS</div><div class="mbadge mbadge-idle" id="badge-ssl">IDLE</div></div><div class="mc" id="content-ssl"><div class="empty">Awaiting scan...</div></div></div>
+        <!-- Row 2 -->
+        <div class="module" id="mod-whois"><div class="module-hdr"><div class="module-title">WHOIS</div><div class="mbadge mbadge-idle" id="badge-whois">IDLE</div></div><div class="mc" id="content-whois"><div class="empty">Awaiting scan...</div></div></div>
+        <div class="module" id="mod-subdomains"><div class="module-hdr"><div class="module-title">Subdomains</div><div class="mbadge mbadge-idle" id="badge-subdomains">IDLE</div></div><div class="mc" id="content-subdomains"><div class="empty">Awaiting scan...</div></div></div>
+        <div class="module" id="mod-geoip"><div class="module-hdr"><div class="module-title">GeoIP / ASN</div><div class="mbadge mbadge-idle" id="badge-geoip">IDLE</div></div><div class="mc" id="content-geoip"><div class="empty">Awaiting scan...</div></div></div>
+        <!-- Row 3 -->
+        <div class="module" id="mod-tech"><div class="module-hdr"><div class="module-title">Tech Stack</div><div class="mbadge mbadge-idle" id="badge-tech">IDLE</div></div><div class="mc" id="content-tech"><div class="empty">Awaiting scan...</div></div></div>
+        <div class="module" id="mod-headers"><div class="module-hdr"><div class="module-title">Security Headers</div><div class="mbadge mbadge-idle" id="badge-headers">IDLE</div></div><div class="mc" id="content-headers"><div class="empty">Awaiting scan...</div></div></div>
+        <div class="module" id="mod-waf"><div class="module-hdr"><div class="module-title">WAF Detection</div><div class="mbadge mbadge-idle" id="badge-waf">IDLE</div></div><div class="mc" id="content-waf"><div class="empty">Awaiting scan...</div></div></div>
+        <!-- Row 4 -->
+        <div class="module" id="mod-breaches"><div class="module-hdr"><div class="module-title">Breach Check</div><div class="mbadge mbadge-idle" id="badge-breaches">IDLE</div></div><div class="mc" id="content-breaches"><div class="empty">Awaiting scan...</div></div></div>
+        <div class="module" id="mod-emailSecurity"><div class="module-hdr"><div class="module-title">Email Security</div><div class="mbadge mbadge-idle" id="badge-emailSecurity">IDLE</div></div><div class="mc" id="content-emailSecurity"><div class="empty">Awaiting scan...</div></div></div>
+        <div class="module" id="mod-reverseDNS"><div class="module-hdr"><div class="module-title">Reverse DNS</div><div class="mbadge mbadge-idle" id="badge-reverseDNS">IDLE</div></div><div class="mc" id="content-reverseDNS"><div class="empty">Awaiting scan...</div></div></div>
+        <!-- Row 5 -->
+        <div class="module" id="mod-httpPreview"><div class="module-hdr"><div class="module-title">HTTP Preview</div><div class="mbadge mbadge-idle" id="badge-httpPreview">IDLE</div></div><div class="mc" id="content-httpPreview"><div class="empty">Awaiting scan...</div></div></div>
+        <div class="module" id="mod-abuseipdb"><div class="module-hdr"><div class="module-title">IP Reputation</div><div class="mbadge mbadge-idle" id="badge-abuseipdb">IDLE</div></div><div class="mc" id="content-abuseipdb"><div class="empty">Awaiting scan...</div></div></div>
+        <div class="module" id="mod-shodan"><div class="module-hdr"><div class="module-title">Shodan</div><div class="mbadge mbadge-idle" id="badge-shodan">IDLE</div></div><div class="mc" id="content-shodan"><div class="empty">Awaiting scan...</div></div></div>
+      </div>
+      <div id="terminal"></div>
+    </div>
+
+    <!-- RIGHT PANEL -->
+    <div id="right">
+      <div id="right-hdr">
+        <div id="right-title">Intelligence Feed</div>
+        <div id="feed-filter">
+          <button class="fbtn active" data-f="all">ALL</button>
+          <button class="fbtn" data-f="high" style="color:var(--red)">HIGH</button>
+          <button class="fbtn" data-f="medium" style="color:var(--yellow)">MED</button>
+          <button class="fbtn" data-f="low" style="color:var(--cyan)">LOW</button>
+        </div>
+      </div>
+      <div id="feed"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ONBOARDING MODAL -->
+<div id="ob-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:200;display:none;align-items:center;justify-content:center;"></div>
+<div id="ob-modal" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:520px;max-width:95vw;background:var(--bg2);border:1px solid var(--border);border-top:3px solid var(--red);z-index:201;flex-direction:column;">
+  <div style="padding:20px 24px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+    <div>
+      <div style="font-family:'Share Tech Mono',monospace;font-size:16px;color:var(--red);letter-spacing:3px;">⚔ THREATOPS</div>
+      <div style="font-size:9.5px;color:var(--text3);margin-top:2px;letter-spacing:1px;">SETUP</div>
+    </div>
+    <div style="display:flex;gap:6px;" id="ob-dots"></div>
+  </div>
+  <div id="ob-body" style="padding:24px;min-height:240px;"></div>
+  <div style="padding:14px 24px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+    <button class="icon-btn" id="ob-back" style="width:auto;padding:0 14px;font-size:10px;font-weight:600;letter-spacing:1px;">← BACK</button>
+    <div style="display:flex;gap:8px;">
+      <button class="icon-btn" id="ob-skip" style="width:auto;padding:0 14px;font-size:10px;color:var(--text3);">SKIP</button>
+      <button id="ob-next" style="height:30px;padding:0 18px;background:var(--red);border:none;color:#fff;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;cursor:pointer;">NEXT →</button>
+    </div>
+  </div>
+</div>
+
+<!-- SETTINGS MODAL -->
+<div id="settings-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:200;"></div>
+<div id="settings-modal" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:460px;max-width:95vw;background:var(--bg2);border:1px solid var(--border);border-top:2px solid var(--cyan);z-index:201;">
+  <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+    <span style="font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--text2);">API Keys</span>
+    <button id="settings-close" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:16px;">✕</button>
+  </div>
+  <div style="padding:18px;">
+    <div style="font-size:9.5px;color:var(--text3);margin-bottom:14px;line-height:1.6;">Keys are saved locally on the server and never exposed to the browser. Leave blank to keep existing value.</div>
+    <div style="margin-bottom:12px;">
+      <div style="font-size:9.5px;font-weight:600;color:var(--text2);letter-spacing:1px;text-transform:uppercase;margin-bottom:5px;">HIBP API Key <span id="hibp-status" style="color:var(--text3);font-weight:400;"></span></div>
+      <input type="password" id="set-hibp" class="inp" style="width:100%;" placeholder="Enter key to update...">
+      <div style="font-size:9px;color:var(--text3);margin-top:3px;">Get one at haveibeenpwned.com/API/Key</div>
+    </div>
+    <div style="margin-bottom:12px;">
+      <div style="font-size:9.5px;font-weight:600;color:var(--text2);letter-spacing:1px;text-transform:uppercase;margin-bottom:5px;">AbuseIPDB API Key <span id="abuse-status" style="color:var(--text3);font-weight:400;"></span></div>
+      <input type="password" id="set-abuse" class="inp" style="width:100%;" placeholder="Enter key to update...">
+      <div style="font-size:9px;color:var(--text3);margin-top:3px;">Get one at abuseipdb.com/account/api</div>
+    </div>
+    <div style="margin-bottom:18px;">
+      <div style="font-size:9.5px;font-weight:600;color:var(--text2);letter-spacing:1px;text-transform:uppercase;margin-bottom:5px;">Shodan API Key <span id="shodan-status" style="color:var(--text3);font-weight:400;"></span></div>
+      <input type="password" id="set-shodan" class="inp" style="width:100%;" placeholder="Enter key to update...">
+      <div style="font-size:9px;color:var(--text3);margin-top:3px;">Get one at account.shodan.io</div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <div id="settings-msg" style="flex:1;font-size:10px;color:var(--green);padding-top:6px;"></div>
+      <button id="settings-save" style="height:30px;padding:0 18px;background:var(--red);border:none;color:#fff;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:1px;cursor:pointer;text-transform:uppercase;">SAVE</button>
+    </div>
+  </div>
+</div>
+
+<!-- HISTORY OVERLAY -->
+<div id="history-overlay"></div>
+<div id="history-drawer">
+  <div id="history-hdr">
+    <span>Scan History</span>
+    <button id="history-close">✕</button>
+  </div>
+  <div id="history-list"></div>
+</div>
+
+<script>
+  // ── UTILS ──────────────────────────────────────────────────────────────────
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const el = id => document.getElementById(id);
+  const setC = (id, html) => { const c = el('content-'+id); if (c) c.innerHTML = html; };
+  function setBadge(id, state, label) {
+    const b = el('badge-'+id); if (!b) return;
+    b.className = 'mbadge mbadge-'+state;
+    b.textContent = label || state.toUpperCase();
+  }
+  function setModState(id, state) {
+    const m = el('mod-'+id); if (m) { m.classList.remove('scanning','done','error'); if (state !== 'idle') m.classList.add(state); }
+    const i = el('ind-'+id); if (i) { i.classList.remove('scanning','done','error'); if (state !== 'idle') i.classList.add(state); }
+  }
+  function log(msg, type='') {
+    const term = el('terminal');
+    const d = document.createElement('div'); d.className='tl '+type;
+    const ts = new Date().toISOString().substring(11,19);
+    d.innerHTML = `<span class="tprefix">${ts}</span>${esc(msg)}`;
+    term.appendChild(d); term.scrollTop = term.scrollHeight;
+  }
+  const loader = () => '<div class="loader"><div class="spin"></div>Scanning...</div>';
+  function flag(code) {
+    if (!code || code.length !== 2) return '';
+    const o = 0x1F1E6 - 65;
+    return String.fromCodePoint(code.charCodeAt(0)+o) + String.fromCodePoint(code.charCodeAt(1)+o);
+  }
+
+  // ── CLOCK ──────────────────────────────────────────────────────────────────
+  setInterval(() => { el('clock').textContent = new Date().toISOString().replace('T',' ').substring(0,19)+' UTC'; }, 1000);
+  el('clock').textContent = new Date().toISOString().replace('T',' ').substring(0,19)+' UTC';
+
+  // ── THEME ──────────────────────────────────────────────────────────────────
+  const themeKey = 'to_theme';
+  const savedTheme = localStorage.getItem(themeKey) || 'dark';
+  document.documentElement.setAttribute('data-theme', savedTheme);
+  el('theme-btn').addEventListener('click', () => {
+    const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem(themeKey, next);
+  });
+
+  // Show logout button if auth is enabled (check by trying to detect cookie)
+  fetch('/api/history').then(r => { if (r.status === 401) el('logout-btn').style.display = ''; });
+
+  // ── FEED FILTER ────────────────────────────────────────────────────────────
+  let activeFilter = 'all';
+  document.querySelectorAll('.fbtn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.fbtn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeFilter = btn.dataset.f;
+      document.querySelectorAll('.finding').forEach(f => {
+        f.style.display = (activeFilter === 'all' || f.dataset.sev === activeFilter) ? '' : 'none';
+      });
+    });
+  });
+
+  function addFinding(f) {
+    const feed = el('feed');
+    const div = document.createElement('div');
+    div.className = `finding ${f.severity}`; div.dataset.sev = f.severity;
+    if (activeFilter !== 'all' && f.severity !== activeFilter) div.style.display = 'none';
+    div.innerHTML = `<div class="fmeta"><span class="sev s-${esc(f.severity)}">${esc(f.severity)}</span><span class="fmod">${esc(f.module)}</span></div><div class="ftitle">${esc(f.title)}</div><div class="fdetail">${esc(f.detail)}</div>`;
+    feed.appendChild(div); feed.scrollTop = feed.scrollHeight;
+  }
+
+  // ── RENDERERS ─────────────────────────────────────────────────────────────
+  function renderDNS(d) {
+    if (d.error) return `<div class="err-text">${esc(d.error)}</div>`;
+    let h = '';
+    for (const [type, recs] of Object.entries(d)) {
+      if (!Array.isArray(recs) || !recs.length) continue;
+      h += `<div class="sl">${esc(type)}</div>`;
+      for (const r of recs) h += `<div class="dr"><span class="dv">${esc(r.data || r.name || JSON.stringify(r))}</span></div>`;
+    }
+    return h || '<div class="empty">No records found</div>';
+  }
+
+  function renderPorts(d) {
+    if (!Array.isArray(d)) return `<div class="err-text">${esc(d.error||'Error')}</div>`;
+    const open = d.filter(p => p.status==='open'), closed = d.filter(p => p.status==='closed'), filt = d.filter(p => p.status==='filtered');
+    let h = `<div class="badge-row" style="margin-bottom:7px;"><span class="tag t-g">${open.length} OPEN</span><span class="tag t-x">${closed.length} CLOSED</span><span class="tag t-y">${filt.length} FILTERED</span></div>`;
+    if (open.length) {
+      h += '<div class="sl">Open Ports</div><div class="chips">';
+      for (const p of open) h += `<span class="chip chip-open">${esc(String(p.port))}<span style="opacity:.6;font-size:8.5px;margin-left:3px;">${esc(p.service)}</span></span>`;
+      h += '</div>';
+    } else h += '<div class="empty">No open ports found</div>';
+    return h;
+  }
+
+  function renderSSL(d) {
+    if (d.error) return `<div class="err-text">${esc(d.error)}</div>`;
+    const days = d.daysRemaining;
+    const col = days < 0 ? 'var(--red)' : days < 30 ? 'var(--yellow)' : 'var(--green)';
+    const pct = Math.max(0, Math.min(100, (days/365)*100));
+    const cn = (d.subject && (d.subject.CN || d.subject.O)) || '?';
+    const iss = (d.issuer && (d.issuer.O || d.issuer.CN)) || '?';
+    let h = `<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:5px;"><span class="ssl-days" style="color:${col};">${days<0?'EXPIRED':days+'d'}</span><span style="color:var(--text3);font-size:9px;">remaining</span></div>`;
+    h += `<div class="cert-bar"><div class="cfill" style="width:${pct}%;background:${col};"></div></div>`;
+    h += `<div style="margin-top:7px;"><div class="dr"><span class="dl">CN</span><span class="dv">${esc(cn)}</span></div>`;
+    h += `<div class="dr"><span class="dl">Issuer</span><span class="dv">${esc(iss)}</span></div>`;
+    h += `<div class="dr"><span class="dl">Protocol</span><span class="dv">${esc(d.protocol||'?')}</span></div>`;
+    h += `<div class="dr"><span class="dl">Cipher</span><span class="dv">${esc(d.cipher||'?')}</span></div>`;
+    if (d.validTo) h += `<div class="dr"><span class="dl">Expires</span><span class="dv">${esc(d.validTo)}</span></div>`;
+    if (d.selfSigned) h += `<span class="tag t-r" style="margin-top:5px;display:inline-block;">SELF-SIGNED</span>`;
+    return h + '</div>';
+  }
+
+  function renderWHOIS(d) {
+    if (d.error && !d.parsed) return `<div class="err-text">${esc(d.error)}</div>`;
+    const p = d.parsed || {}; let h = '';
+    if (p.registrar) h += `<div class="dr"><span class="dl">Registrar</span><span class="dv">${esc(p.registrar)}</span></div>`;
+    if (p.registrant) h += `<div class="dr"><span class="dl">Registrant</span><span class="dv">${esc(p.registrant)}</span></div>`;
+    if (p.created) h += `<div class="dr"><span class="dl">Created</span><span class="dv">${esc(p.created)}</span></div>`;
+    if (p.expires) h += `<div class="dr"><span class="dl">Expires</span><span class="dv">${esc(p.expires)}</span></div>`;
+    if (p.updated) h += `<div class="dr"><span class="dl">Updated</span><span class="dv">${esc(p.updated)}</span></div>`;
+    if (p.nameservers?.length) { h += `<div class="sl">Nameservers</div>`; for (const ns of p.nameservers.slice(0,4)) h += `<div class="dr"><span class="dv">${esc(ns)}</span></div>`; }
+    if (p.privacy) h += `<span class="tag t-y" style="margin-top:5px;display:inline-block;">PRIVACY ENABLED</span>`;
+    return h || '<div class="empty">No WHOIS data</div>';
+  }
+
+  function renderSubdomains(d) {
+    if (d.error) return `<div class="err-text">${esc(d.error)}</div>`;
+    if (!Array.isArray(d)) return '<div class="err-text">Invalid data</div>';
+    const live = d.filter(s => s.live), dead = d.filter(s => !s.live);
+    let h = `<div class="badge-row" style="margin-bottom:7px;"><span class="tag t-g">${live.length} LIVE</span><span class="tag t-x">${dead.length} DEAD</span><span class="tag t-x">${d.length} TOTAL</span></div>`;
+    for (const s of live.slice(0,20)) h += `<div class="sub-row live"><span style="color:var(--text);font-size:10.5px;">${esc(s.subdomain)}</span><span style="color:var(--text3);font-size:9.5px;">${esc(s.ips[0]||'')}</span></div>`;
+    if (live.length > 20) h += `<div class="empty">...and ${live.length-20} more</div>`;
+    return h || '<div class="empty">No subdomains found</div>';
+  }
+
+  function renderGeoIP(d) {
+    if (d.error) return `<div class="err-text">${esc(d.error)}</div>`;
+    let h = `<div style="margin-bottom:8px;"><span style="font-size:18px;">${flag(d.countryCode)}</span><span style="font-size:13px;font-weight:600;color:var(--text);margin-left:7px;">${esc(d.country||'Unknown')}</span></div>`;
+    if (d.resolvedIP||d.query) h += `<div class="dr"><span class="dl">IP</span><span class="dv">${esc(d.resolvedIP||d.query)}</span></div>`;
+    if (d.city) h += `<div class="dr"><span class="dl">Location</span><span class="dv">${esc(d.city)}${d.regionName?', '+esc(d.regionName):''}</span></div>`;
+    if (d.isp) h += `<div class="dr"><span class="dl">ISP</span><span class="dv">${esc(d.isp)}</span></div>`;
+    if (d.org) h += `<div class="dr"><span class="dl">Org</span><span class="dv">${esc(d.org)}</span></div>`;
+    if (d.as) h += `<div class="dr"><span class="dl">ASN</span><span class="dv">${esc(d.as)}</span></div>`;
+    const tags = []; if (d.proxy) tags.push('<span class="tag t-y">PROXY</span>'); if (d.hosting) tags.push('<span class="tag t-c">HOSTING</span>');
+    if (tags.length) h += `<div class="badge-row" style="margin-top:5px;">${tags.join('')}</div>`;
+    return h;
+  }
+
+  function renderTech(d) {
+    if (d.error) return `<div class="err-text">${esc(d.error)}</div>`;
+    if (!d.tech?.length) return '<div class="empty">No technologies detected</div>';
+    const catColors = { Server:'t-c', Runtime:'t-c', Language:'t-c', CMS:'t-y', Ecommerce:'t-y', 'JS Framework':'t-p', 'SSR Framework':'t-p', 'Static Site':'t-p', 'JS Library':'t-x', 'CSS Framework':'t-x', 'CDN':'t-g', 'CDN/WAF':'t-g', Cloud:'t-g', Hosting:'t-g', Framework:'t-p' };
+    let h = `<div style="color:var(--text3);font-size:9.5px;margin-bottom:5px;">HTTP ${esc(String(d.statusCode||'?'))}</div>`;
+    const bycat = {}; for (const t of d.tech) (bycat[t.category]=bycat[t.category]||[]).push(t);
+    for (const [cat, items] of Object.entries(bycat)) {
+      h += `<div class="sl">${esc(cat)}</div>`;
+      for (const t of items) h += `<div class="tech-item"><span style="color:var(--text);font-weight:500;">${esc(t.name)}</span><span class="tag ${catColors[cat]||'t-x'}" style="font-size:8.5px;">${esc(t.confidence)}</span></div>`;
+    }
+    return h;
+  }
+
+  function renderHeaders(d) {
+    if (d.error) return `<div class="err-text">${esc(d.error)}</div>`;
+    const g = d.letterGrade||'F', s = d.score||0;
+    const gc = {A:'var(--green)',B:'#7dd3fc',C:'var(--yellow)',D:'#f97316',E:'#f97316',F:'var(--red)'}[g]||'var(--red)';
+    const bc = s>=75?'var(--green)':s>=45?'var(--yellow)':'var(--red)';
+    let h = `<div class="grade-display"><span class="grade-letter g-${g}">${esc(g)}</span><div style="flex:1;"><div style="color:var(--text2);font-size:9.5px;margin-bottom:3px;">${s}/100</div><div class="sbar"><div class="sfill" style="width:${s}%;background:${bc};"></div></div></div></div>`;
+    if (d.audit?.length) {
+      h += '<div class="sl">Headers</div>';
+      for (const hdr of d.audit) {
+        const ic = hdr.grade==='GOOD'?'✓':hdr.grade==='MISSING'?'✗':'~';
+        const col = hdr.grade==='GOOD'?'var(--green)':hdr.grade==='MISSING'?'var(--red)':'var(--yellow)';
+        h += `<div class="dr"><span style="color:${col};font-weight:700;margin-right:4px;">${ic}</span><span class="dv" style="font-size:9px;">${esc(hdr.name)}</span></div>`;
+      }
+    }
+    return h;
+  }
+
+  function renderWAF(d) {
+    if (d.error) return `<div class="err-text">${esc(d.error)}</div>`;
+    if (d.detected && d.wafs?.length) {
+      let h = `<span class="tag t-g" style="margin-bottom:7px;display:inline-block;">WAF DETECTED</span><div class="sl">Identified</div>`;
+      for (const w of d.wafs) h += `<div class="dr"><span class="dv">${esc(w.name)}</span><span style="color:var(--text3);font-size:9px;margin-left:auto;">${esc(w.evidence)}</span></div>`;
+      return h;
+    }
+    return '<span class="tag t-y" style="display:inline-block;">No WAF detected</span>';
+  }
+
+  function renderBreaches(d) {
+    if (d.skipped) return '<div class="empty">No email provided</div>';
+    if (d.error) return `<div class="err-text">${esc(d.error)}</div>`;
+    if (!d.count) return '<span class="tag t-g" style="display:inline-block;">Clean — no breaches found</span>';
+    let h = `<span class="tag t-r" style="margin-bottom:7px;display:inline-block;">${d.count} BREACH${d.count!==1?'ES':''}</span>`;
+    for (const b of (d.breaches||[]).slice(0,10)) h += `<div class="breach-item"><div style="color:var(--red);font-weight:600;font-size:10.5px;">${esc(b.Name)}</div><div style="color:var(--text2);font-size:9.5px;">${esc(b.BreachDate||'')}${b.PwnCount?' · '+b.PwnCount.toLocaleString()+' accts':''}</div></div>`;
+    return h;
+  }
+
+  function renderEmailSecurity(d) {
+    if (d.error) return `<div class="err-text">${esc(d.error)}</div>`;
+    let h = '';
+    const spf = d.spf||{}, dmarc = d.dmarc||{};
+    h += `<div class="ec"><span style="font-size:12px;color:${spf.present?'var(--green)':'var(--red)'};">${spf.present?'✓':'✗'}</span><span style="font-weight:600;color:var(--text2);font-size:9.5px;margin-left:4px;">SPF</span><span class="tag ${spf.present?'t-g':'t-r'}" style="margin-left:auto;">${spf.present?(spf.policy||'PRESENT'):'MISSING'}</span></div>`;
+    h += `<div class="ec"><span style="font-size:12px;color:${dmarc.present?'var(--green)':'var(--red)'};">${dmarc.present?'✓':'✗'}</span><span style="font-weight:600;color:var(--text2);font-size:9.5px;margin-left:4px;">DMARC</span><span class="tag ${dmarc.present?'t-g':'t-r'}" style="margin-left:auto;">${dmarc.present?'p='+esc(dmarc.policy||'none'):'MISSING'}</span></div>`;
+    const dk = (d.dkim||[]).length;
+    h += `<div class="ec"><span style="font-size:12px;color:${dk?'var(--green)':'var(--text3)'};">${dk?'✓':'?'}</span><span style="font-weight:600;color:var(--text2);font-size:9.5px;margin-left:4px;">DKIM</span><span class="tag ${dk?'t-g':'t-x'}" style="margin-left:auto;">${dk?dk+' selector'+(dk!==1?'s':''):'not found'}</span></div>`;
+    if (d.mx?.length) { h += '<div class="sl">MX</div>'; for (const mx of d.mx.slice(0,3)) h += `<div class="dr"><span class="dl">${esc(String(mx.priority))}</span><span class="dv">${esc(mx.host)}</span></div>`; }
+    return h;
+  }
+
+  function renderReverseDNS(d) {
+    if (d.error) return `<div class="err-text">${esc(d.error)}</div>`;
+    if (!d.records?.length) return '<div class="empty">No PTR records found</div>';
+    let h = '';
+    for (const r of d.records) {
+      if (!r.ip) continue;
+      h += `<div class="dr"><div><div style="display:flex;align-items:center;gap:5px;"><span class="tag ${r.version==='IPv6'?'t-p':'t-c'}" style="font-size:8.5px;">${esc(r.version)}</span><span class="dv">${esc(r.ip)}</span></div>${r.hostnames?.length?`<div style="color:var(--text3);font-size:9px;margin-top:1px;">→ ${esc(r.hostnames.join(', '))}</div>`:''}</div></div>`;
+    }
+    return h;
+  }
+
+  function renderHTTPPreview(d) {
+    if (d.error) return `<div class="err-text">${esc(d.error)}</div>`;
+    let h = `<div class="dr"><span class="dl">Status</span><span class="dv" style="color:${d.statusCode<400?'var(--green)':'var(--red)'};">${esc(String(d.statusCode))}</span></div>`;
+    if (d.title) h += `<div class="dr"><span class="dl">Title</span><span class="dv">${esc(d.title)}</span></div>`;
+    if (d.description) h += `<div class="dr"><span class="dl">Desc</span><span class="dv">${esc(d.description.substring(0,100))}${d.description.length>100?'...':''}</span></div>`;
+    if (d.generator) h += `<div class="dr"><span class="dl">Generator</span><span class="dv">${esc(d.generator)}</span></div>`;
+    if (d.contentType) h += `<div class="dr"><span class="dl">Content-Type</span><span class="dv">${esc(d.contentType.split(';')[0])}</span></div>`;
+    h += `<div class="sl">Page Stats</div><div class="badge-row"><span class="tag t-c">${d.links} links</span><span class="tag t-y">${d.scripts} scripts</span><span class="tag t-p">${d.forms} forms</span>${d.iframes>0?`<span class="tag t-r">${d.iframes} iframes</span>`:''}</div>`;
+    if (d.preview) h += `<div class="sl">Body Preview</div><div style="color:var(--text2);font-size:9px;line-height:1.5;padding:4px 6px;background:var(--bg3);border-left:2px solid var(--border2);">${esc(d.preview.substring(0,250))}...</div>`;
+    return h;
+  }
+
+  function renderAbuseIPDB(d) {
+    if (d.error) return `<div class="err-text">${esc(d.error)}</div>`;
+    const score = d.abuseConfidenceScore || 0;
+    const col = score > 75 ? 'var(--red)' : score > 25 ? 'var(--yellow)' : 'var(--green)';
+    const lbl = score > 75 ? 'HIGH RISK' : score > 25 ? 'SUSPICIOUS' : 'CLEAN';
+    let h = `<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:6px;"><span class="score-big" style="color:${col};">${score}%</span><span style="font-size:10px;color:${col};font-weight:600;">${lbl}</span></div>`;
+    h += `<div class="sbar" style="margin-bottom:8px;"><div class="sfill" style="width:${score}%;background:${col};"></div></div>`;
+    if (d.totalReports) h += `<div class="dr"><span class="dl">Reports</span><span class="dv">${esc(String(d.totalReports))} (${esc(String(d.numDistinctUsers||0))} users)</span></div>`;
+    if (d.lastReportedAt) h += `<div class="dr"><span class="dl">Last Report</span><span class="dv">${esc(d.lastReportedAt.substring(0,10))}</span></div>`;
+    if (d.isp) h += `<div class="dr"><span class="dl">ISP</span><span class="dv">${esc(d.isp)}</span></div>`;
+    if (d.domain) h += `<div class="dr"><span class="dl">Domain</span><span class="dv">${esc(d.domain)}</span></div>`;
+    if (d.usageType) h += `<div class="dr"><span class="dl">Type</span><span class="dv">${esc(d.usageType)}</span></div>`;
+    return h;
+  }
+
+  function renderShodan(d) {
+    if (d.error) return `<div class="err-text">${esc(d.error)}</div>`;
+    let h = '';
+    if (d.org) h += `<div class="dr"><span class="dl">Org</span><span class="dv">${esc(d.org)}</span></div>`;
+    if (d.asn) h += `<div class="dr"><span class="dl">ASN</span><span class="dv">${esc(d.asn)}</span></div>`;
+    if (d.lastUpdate) h += `<div class="dr"><span class="dl">Updated</span><span class="dv">${esc(d.lastUpdate.substring(0,10))}</span></div>`;
+    if (d.ports?.length) {
+      h += '<div class="sl">Open Ports</div><div class="chips">';
+      for (const p of d.ports.slice(0,20)) h += `<span class="chip chip-open">${esc(String(p))}</span>`;
+      h += '</div>';
+    }
+    if (d.vulns?.length) {
+      h += '<div class="sl" style="color:var(--red);">CVEs</div>';
+      for (const v of d.vulns.slice(0,8)) h += `<div class="dr"><span class="tag t-r">${esc(v)}</span></div>`;
+      if (d.vulns.length > 8) h += `<div class="empty">...and ${d.vulns.length-8} more</div>`;
+    }
+    if (d.services?.length) {
+      h += '<div class="sl">Services</div>';
+      for (const s of d.services.slice(0,5)) {
+        h += `<div class="svc-row"><span class="svc-port">${esc(String(s.port))}</span><span class="svc-product">${esc(s.product||s.transport||'')}</span>${s.version?`<span style="color:var(--text3);font-size:9.5px;margin-left:4px;">${esc(s.version)}</span>`:''}${s.banner?`<div class="svc-banner">${esc(s.banner)}</div>`:''}</div>`;
+      }
+    }
+    if (d.tags?.length) { h += '<div class="badge-row" style="margin-top:5px;">'; for (const t of d.tags) h += `<span class="tag t-c">${esc(t)}</span>`; h += '</div>'; }
+    return h || '<div class="empty">No Shodan data</div>';
+  }
+
+  // ── HISTORY ────────────────────────────────────────────────────────────────
+  function openHistory() {
+    el('history-overlay').style.display = 'block';
+    el('history-drawer').classList.add('open');
+    loadHistoryList();
+  }
+  function closeHistory() {
+    el('history-overlay').style.display = 'none';
+    el('history-drawer').classList.remove('open');
+  }
+  el('history-btn').addEventListener('click', openHistory);
+  el('history-close').addEventListener('click', closeHistory);
+  el('history-overlay').addEventListener('click', closeHistory);
+
+  async function loadHistoryList() {
+    const list = el('history-list');
+    list.innerHTML = '<div class="h-empty">Loading...</div>';
+    try {
+      const r = await fetch('/api/history');
+      const items = await r.json();
+      if (!items.length) { list.innerHTML = '<div class="h-empty">No scan history yet.</div>'; return; }
+      list.innerHTML = '';
+      for (const item of items) {
+        const div = document.createElement('div'); div.className = 'h-item';
+        const ts = new Date(item.ts).toLocaleString();
+        div.innerHTML = `
+          <div style="flex:1;min-width:0;">
+            <div class="h-target">${esc(item.target)}</div>
+            <div class="h-ts">${esc(ts)}</div>
+          </div>
+          <div class="h-counts">
+            ${item.high?`<span class="fcnt fcnt-h" style="display:inline;">${item.high}H</span>`:''}
+            ${item.medium?`<span class="fcnt fcnt-m" style="display:inline;">${item.medium}M</span>`:''}
+            ${item.low?`<span class="fcnt fcnt-l" style="display:inline;">${item.low}L</span>`:''}
+          </div>
+          <button class="h-del" data-id="${esc(item.id)}" title="Delete">×</button>`;
+        div.addEventListener('click', (e) => {
+          if (e.target.classList.contains('h-del')) return;
+          loadHistoryScan(item.id);
+        });
+        div.querySelector('.h-del').addEventListener('click', async (e) => {
+          e.stopPropagation();
+          await fetch(`/api/history/${item.id}`, { method: 'DELETE' });
+          div.remove();
+          if (!list.children.length) list.innerHTML = '<div class="h-empty">No scan history yet.</div>';
+        });
+        list.appendChild(div);
+      }
+    } catch { list.innerHTML = '<div class="h-empty">Failed to load history.</div>'; }
+  }
+
+  async function loadHistoryScan(id) {
+    closeHistory();
+    try {
+      const r = await fetch(`/api/history/${id}`);
+      const data = await r.json();
+      if (data.error) { log('Failed to load scan: ' + data.error, 'err'); return; }
+      el('target-input').value = data.target || '';
+      if (data.email) el('email-input').value = data.email;
+      resetUI();
+      const res = data.results || {};
+      const renderMap = {
+        dns: renderDNS, ports: renderPorts, ssl: renderSSL, whois: renderWHOIS,
+        subdomains: renderSubdomains, geoip: renderGeoIP, tech: renderTech,
+        headers: renderHeaders, waf: renderWAF, breaches: renderBreaches,
+        emailSecurity: renderEmailSecurity, reverseDNS: renderReverseDNS,
+        httpPreview: renderHTTPPreview, abuseipdb: renderAbuseIPDB, shodan: renderShodan,
+      };
+      for (const [mod, fn] of Object.entries(renderMap)) {
+        if (res[mod] !== undefined) { setModState(mod, res[mod].error ? 'error' : 'done'); setBadge(mod, res[mod].error ? 'error' : 'done', res[mod].error ? 'ERROR' : 'DONE'); setC(mod, fn(res[mod])); }
+      }
+      for (const f of (data.findings || [])) addFinding(f);
+      updateCounts(data.findings || []);
+      currentScanData = data;
+      el('export-btn').style.display = '';
+      log(`Loaded history: ${data.target} (${new Date(data.ts).toLocaleString()})`, 'info');
+    } catch (e) { log('Failed to load scan: ' + e.message, 'err'); }
+  }
+
+  // ── EXPORT ─────────────────────────────────────────────────────────────────
+  let currentScanData = null;
+  el('export-btn').addEventListener('click', () => {
+    if (!currentScanData) return;
+    const blob = new Blob([JSON.stringify(currentScanData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `threatops-${(currentScanData.target||'scan').replace(/[^a-z0-9]/gi,'-')}-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  // ── COUNTS ─────────────────────────────────────────────────────────────────
+  function updateCounts(findings) {
+    const counts = { high:0, medium:0, low:0, info:0 };
+    for (const f of findings) counts[f.severity] = (counts[f.severity]||0)+1;
+    const map = { h: counts.high, m: counts.medium, l: counts.low, i: counts.info };
+    for (const [k,v] of Object.entries(map)) {
+      const e = el('cnt-'+k); if (!e) continue;
+      e.style.display = v ? '' : 'none';
+      e.textContent = `${v} ${k.toUpperCase()}`;
+    }
+  }
+
+  // ── SCAN ───────────────────────────────────────────────────────────────────
+  const ALL_MODULES = ['dns','ports','ssl','whois','subdomains','geoip','tech','headers','waf','breaches','emailSecurity','reverseDNS','httpPreview','abuseipdb','shodan'];
+  let scanning = false, es = null;
+
+  function resetUI() {
+    el('feed').innerHTML = ''; el('terminal').innerHTML = '';
+    ['h','m','l','i'].forEach(k => { const e = el('cnt-'+k); if(e) e.style.display='none'; });
+    for (const m of ALL_MODULES) { setModState(m,'idle'); setBadge(m,'idle'); setC(m,'<div class="empty">Awaiting scan...</div>'); }
+    el('export-btn').style.display = 'none';
+    currentScanData = null;
+  }
+
+  function startScan(target, email) {
+    if (scanning) return;
+    // Basic input validation
+    const clean = target.trim().replace(/^https?:\/\//,'').split('/')[0].split(':')[0];
+    if (!clean) { log('Enter a valid domain or IP address', 'err'); return; }
+
+    scanning = true;
+    el('scan-btn').disabled = true; el('scan-btn').textContent = 'SCANNING';
+    resetUI();
+    for (const m of ALL_MODULES) { setModState(m,'scanning'); setBadge(m,'scanning'); setC(m,loader()); }
+    log(`Target: ${target}${email?' | Email: '+email:''}`, 'info');
+
+    const params = new URLSearchParams({ target });
+    if (email) params.set('email', email);
+    es = new EventSource(`/api/scan?${params}`);
+
+    const scanResults = {};
+
+    const renderMap = {
+      dns: renderDNS, ports: renderPorts, ssl: renderSSL, whois: renderWHOIS,
+      subdomains: renderSubdomains, geoip: renderGeoIP, tech: renderTech,
+      headers: renderHeaders, waf: renderWAF, breaches: renderBreaches,
+      emailSecurity: renderEmailSecurity, reverseDNS: renderReverseDNS,
+      httpPreview: renderHTTPPreview, abuseipdb: renderAbuseIPDB, shodan: renderShodan,
     };
 
-    // ─── UTILITIES ───────────────────────────────────────────────────────────
-    function updateClock() {
-      const now = new Date();
-      const utc = now.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
-      document.getElementById('clock').textContent = utc;
+    for (const [mod, fn] of Object.entries(renderMap)) {
+      es.addEventListener(mod, (e) => {
+        const d = JSON.parse(e.data);
+        scanResults[mod] = d;
+        setC(mod, fn(d));
+      });
     }
 
-    function logTerminal(msg, isError = false) {
-      const term = document.getElementById('terminal');
-      const line = document.createElement('div');
-      line.className = `terminal-line ${isError ? 'error' : ''}`;
-      line.textContent = `> ${msg}`;
-      term.appendChild(line);
-      term.scrollTop = term.scrollHeight;
-    }
+    es.addEventListener('status', (e) => {
+      const d = JSON.parse(e.data);
+      if (d.module && d.done) { setModState(d.module, d.error?'error':'done'); setBadge(d.module, d.error?'error':'done', d.error?'ERROR':'DONE'); }
+      if (d.msg) log(d.msg, d.error?'err':'');
+    });
 
-    function clearModule(moduleId) {
-      const content = modules[moduleId]?.querySelector('.module-content');
-      if (content) content.innerHTML = '';
-    }
+    es.addEventListener('findings', (e) => {
+      const findings = JSON.parse(e.data);
+      for (const f of findings) addFinding(f);
+    });
 
-    function addFinding(severity, title, detail, module) {
-      const feed = document.getElementById('feedContainer');
-      const finding = document.createElement('div');
-      finding.className = `finding ${severity}`;
-      finding.innerHTML = `
-        <div>
-          <span class="finding-severity">${severity}</span>
-          <span style="color: #ff2a2a; font-weight: 600;">${module}</span>
+    es.addEventListener('done', (e) => {
+      const d = JSON.parse(e.data);
+      scanning = false; es.close();
+      el('scan-btn').disabled = false; el('scan-btn').textContent = 'SCAN';
+      log('Scan complete.', 'info');
+      if (d.counts) updateCounts(Object.entries(d.counts).flatMap(([sev,cnt]) => Array(cnt).fill({severity:sev})));
+      currentScanData = { target, email: email||null, ts: new Date().toISOString(), scanId: d.scanId, results: scanResults };
+      el('export-btn').style.display = '';
+    });
+
+    es.addEventListener('error', () => {
+      if (!scanning) return;
+      log('Connection error — check if server is running', 'err');
+      scanning = false; es.close();
+      el('scan-btn').disabled = false; el('scan-btn').textContent = 'SCAN';
+      for (const m of ALL_MODULES) { const b = el('badge-'+m); if (b?.textContent==='SCANNING') { setModState(m,'idle'); setBadge(m,'idle'); setC(m,'<div class="empty">Scan interrupted</div>'); } }
+    });
+  }
+
+  el('scan-btn').addEventListener('click', () => {
+    const t = el('target-input').value.trim(), em = el('email-input').value.trim();
+    if (!t) { log('Enter a domain, IP, or URL', 'err'); return; }
+    startScan(t, em);
+  });
+
+  // ── KEYBOARD SHORTCUTS ─────────────────────────────────────────────────────
+  document.addEventListener('keydown', (e) => {
+    // Ctrl/Cmd + Enter → scan
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault(); el('scan-btn').click();
+    }
+    // Escape → stop scan
+    if (e.key === 'Escape' && scanning) {
+      if (es) es.close();
+      scanning = false;
+      el('scan-btn').disabled = false; el('scan-btn').textContent = 'SCAN';
+      log('Scan cancelled by user', 'err');
+    }
+    // Ctrl+H → history
+    if ((e.ctrlKey || e.metaKey) && e.key === 'h') {
+      e.preventDefault(); openHistory();
+    }
+    // Ctrl+E → export
+    if ((e.ctrlKey || e.metaKey) && e.key === 'e') {
+      e.preventDefault(); el('export-btn').click();
+    }
+    // Ctrl+T → theme
+    if ((e.ctrlKey || e.metaKey) && e.key === 't') {
+      e.preventDefault(); el('theme-btn').click();
+    }
+    // Ctrl+L → focus target input
+    if ((e.ctrlKey || e.metaKey) && e.key === 'l') {
+      e.preventDefault(); el('target-input').focus(); el('target-input').select();
+    }
+  });
+
+  el('target-input').addEventListener('keypress', (e) => { if (e.key==='Enter') el('scan-btn').click(); });
+
+  // ── ONBOARDING ──────────────────────────────────────────────────────────────
+  const OB_STEPS = [
+    {
+      title: 'Welcome to THREATOPS',
+      render: () => `
+        <div style="margin-bottom:16px;">
+          <div style="font-size:15px;font-weight:700;color:var(--text);margin-bottom:8px;">Your personal threat intelligence platform.</div>
+          <div style="font-size:10.5px;color:var(--text2);line-height:1.8;">THREATOPS runs <strong style="color:var(--text);">15 recon modules</strong> simultaneously against any domain or IP and consolidates the results into an actionable intelligence feed.</div>
         </div>
-        <div class="finding-title">${title}</div>
-        <div class="finding-detail">${detail}</div>
-      `;
-      feed.appendChild(finding);
-      feed.scrollTop = feed.scrollHeight;
-    }
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          ${[['DNS & Subdomains','Enumerate records + cert transparency'],['Port Scanner','Top 25 ports with service detection'],['SSL / TLS','Cert expiry, protocol, cipher audit'],['WAF Detection','Cloudflare, Imperva, F5, ModSecurity'],['Security Headers','A–F grade + missing header analysis'],['IP Reputation','AbuseIPDB confidence scoring'],['Shodan','CVEs, open ports, banners'],['Email Security','SPF / DKIM / DMARC policy audit']].map(([t,d])=>`<div style="padding:8px 10px;background:var(--bg3);border-left:2px solid var(--border2);"><div style="font-weight:600;font-size:10px;color:var(--text);margin-bottom:2px;">${t}</div><div style="font-size:9.5px;color:var(--text3);">${d}</div></div>`).join('')}
+        </div>
+      `,
+    },
+    {
+      title: 'Configure API Keys',
+      render: () => `
+        <div style="font-size:10.5px;color:var(--text2);margin-bottom:16px;line-height:1.7;">Some modules require API keys. Add them here — they're saved on the server and never leave it. You can update them anytime via the ⚙ button.</div>
+        <div style="margin-bottom:11px;">
+          <div style="font-size:9.5px;font-weight:600;color:var(--text2);letter-spacing:1px;text-transform:uppercase;margin-bottom:5px;">HIBP API Key <span style="color:var(--text3);font-weight:400;">(breach check)</span></div>
+          <input type="password" id="ob-hibp" class="inp" style="width:100%;" placeholder="Paste key...">
+          <div style="font-size:9px;color:var(--text3);margin-top:2px;">haveibeenpwned.com/API/Key · Free tier works</div>
+        </div>
+        <div style="margin-bottom:11px;">
+          <div style="font-size:9.5px;font-weight:600;color:var(--text2);letter-spacing:1px;text-transform:uppercase;margin-bottom:5px;">AbuseIPDB API Key <span style="color:var(--text3);font-weight:400;">(IP reputation)</span></div>
+          <input type="password" id="ob-abuse" class="inp" style="width:100%;" placeholder="Paste key...">
+          <div style="font-size:9px;color:var(--text3);margin-top:2px;">abuseipdb.com/account/api · Free tier works</div>
+        </div>
+        <div style="margin-bottom:4px;">
+          <div style="font-size:9.5px;font-weight:600;color:var(--text2);letter-spacing:1px;text-transform:uppercase;margin-bottom:5px;">Shodan API Key <span style="color:var(--text3);font-weight:400;">(CVEs + banners)</span></div>
+          <input type="password" id="ob-shodan" class="inp" style="width:100%;" placeholder="Paste key...">
+          <div style="font-size:9px;color:var(--text3);margin-top:2px;">account.shodan.io · Requires paid plan for full results</div>
+        </div>
+        <div id="ob-keys-msg" style="font-size:10px;color:var(--green);margin-top:8px;"></div>
+      `,
+      onNext: async () => {
+        const keys = {};
+        const hibp = el('ob-hibp')?.value?.trim();
+        const abuse = el('ob-abuse')?.value?.trim();
+        const shodan = el('ob-shodan')?.value?.trim();
+        if (hibp) keys.HIBP_API_KEY = hibp;
+        if (abuse) keys.ABUSEIPDB_API_KEY = abuse;
+        if (shodan) keys.SHODAN_API_KEY = shodan;
+        if (Object.keys(keys).length) {
+          try {
+            await fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(keys) });
+            const msg = el('ob-keys-msg');
+            if (msg) { msg.textContent = '✓ Keys saved'; }
+          } catch {}
+        }
+      },
+    },
+    {
+      title: 'Quick Reference',
+      render: () => `
+        <div style="font-size:10.5px;color:var(--text2);margin-bottom:14px;">You're all set. Here's a quick reference:</div>
+        <div style="margin-bottom:14px;">
+          <div class="sl" style="margin-top:0;">Keyboard Shortcuts</div>
+          ${[['Ctrl+Enter','Run scan'],['Escape','Cancel scan'],['Ctrl+H','Scan history'],['Ctrl+E','Export JSON'],['Ctrl+T','Toggle theme'],['Ctrl+L','Focus input']].map(([k,v])=>`<div style="display:flex;justify-content:space-between;padding:4px 8px;margin-bottom:2px;background:var(--bg3);"><span style="color:var(--cyan);font-weight:600;font-size:10px;">${k}</span><span style="color:var(--text2);font-size:10px;">${v}</span></div>`).join('')}
+        </div>
+        <div>
+          <div class="sl">Tips</div>
+          <div style="font-size:9.5px;color:var(--text2);line-height:1.8;">
+            • Scan results auto-save to scan history<br>
+            • Use the ⬇ button to export any scan as JSON<br>
+            • Filter findings by severity with the HIGH / MED / LOW buttons<br>
+            • Update API keys anytime via the ⚙ button
+          </div>
+        </div>
+      `,
+    },
+  ];
 
-    // ─── EVENT LISTENERS ────────────────────────────────────────────────────
-    document.getElementById('scanBtn').addEventListener('click', () => {
-      const target = document.getElementById('targetInput').value.trim();
-      const email = document.getElementById('emailInput').value.trim();
-      if (!target) {
-        logTerminal('Error: Enter a domain or URL', true);
-        return;
+  let obStep = 0;
+  function renderOBStep() {
+    const step = OB_STEPS[obStep];
+    const body = el('ob-body');
+    body.innerHTML = `<div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:14px;">${step.title}</div>${step.render()}`;
+    // Dots
+    const dots = el('ob-dots');
+    dots.innerHTML = OB_STEPS.map((_,i) => `<div style="width:7px;height:7px;border-radius:50%;background:${i===obStep?'var(--red)':'var(--border2)'};transition:background .2s;"></div>`).join('');
+    el('ob-back').style.visibility = obStep === 0 ? 'hidden' : 'visible';
+    el('ob-next').textContent = obStep === OB_STEPS.length - 1 ? 'FINISH' : 'NEXT →';
+  }
+
+  function showOnboarding() {
+    obStep = 0;
+    el('ob-overlay').style.display = 'flex';
+    el('ob-modal').style.display = 'flex';
+    renderOBStep();
+  }
+
+  async function completeOnboarding() {
+    el('ob-overlay').style.display = 'none';
+    el('ob-modal').style.display = 'none';
+    await fetch('/api/onboarding/complete', { method: 'POST' }).catch(() => {});
+  }
+
+  el('ob-next').addEventListener('click', async () => {
+    const step = OB_STEPS[obStep];
+    if (step.onNext) await step.onNext();
+    if (obStep < OB_STEPS.length - 1) { obStep++; renderOBStep(); }
+    else { await completeOnboarding(); }
+  });
+  el('ob-back').addEventListener('click', () => { if (obStep > 0) { obStep--; renderOBStep(); } });
+  el('ob-skip').addEventListener('click', completeOnboarding);
+
+  // ── SETTINGS MODAL ────────────────────────────────────────────────────────
+  el('settings-btn').addEventListener('click', async () => {
+    el('settings-overlay').style.display = 'block';
+    el('settings-modal').style.display = 'block';
+    el('settings-msg').textContent = '';
+    el('set-hibp').value = ''; el('set-abuse').value = ''; el('set-shodan').value = '';
+    try {
+      const r = await fetch('/api/settings'); const cfg = await r.json();
+      el('hibp-status').textContent = cfg.hibpConfigured ? '✓ configured' : '✗ not set';
+      el('hibp-status').style.color = cfg.hibpConfigured ? 'var(--green)' : 'var(--red)';
+      el('abuse-status').textContent = cfg.abuseConfigured ? '✓ configured' : '✗ not set';
+      el('abuse-status').style.color = cfg.abuseConfigured ? 'var(--green)' : 'var(--red)';
+      el('shodan-status').textContent = cfg.shodanConfigured ? '✓ configured' : '✗ not set';
+      el('shodan-status').style.color = cfg.shodanConfigured ? 'var(--green)' : 'var(--red)';
+    } catch {}
+  });
+  el('settings-close').addEventListener('click', () => { el('settings-overlay').style.display='none'; el('settings-modal').style.display='none'; });
+  el('settings-overlay').addEventListener('click', () => { el('settings-overlay').style.display='none'; el('settings-modal').style.display='none'; });
+  el('settings-save').addEventListener('click', async () => {
+    const body = {};
+    const hibp = el('set-hibp').value.trim(); const abuse = el('set-abuse').value.trim(); const shodan = el('set-shodan').value.trim();
+    if (hibp) body.HIBP_API_KEY = hibp;
+    if (abuse) body.ABUSEIPDB_API_KEY = abuse;
+    if (shodan) body.SHODAN_API_KEY = shodan;
+    if (!Object.keys(body).length) { el('settings-msg').textContent = 'No changes to save.'; el('settings-msg').style.color='var(--text3)'; return; }
+    try {
+      await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+      el('settings-msg').textContent = '✓ Saved successfully';
+      el('settings-msg').style.color = 'var(--green)';
+      el('set-hibp').value=''; el('set-abuse').value=''; el('set-shodan').value='';
+    } catch { el('settings-msg').textContent = 'Error saving keys'; el('settings-msg').style.color='var(--red)'; }
+  });
+
+  // ── CHECK ONBOARDING ON LOAD ───────────────────────────────────────────────
+  (async () => {
+    try {
+      const r = await fetch('/api/me');
+      if (r.ok) {
+        const user = await r.json();
+        el('logout-btn').style.display = '';
+        if (!user.onboarded) showOnboarding();
       }
-      startScan(target, email);
-    });
-
-    document.getElementById('targetInput').addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') document.getElementById('scanBtn').click();
-    });
-
-    // ─── SCAN LOGIC ──────────────────────────────────────────────────────────
-    function startScan(target, email) {
-      if (scanning) return;
-      scanning = true;
-      currentTarget = target;
-
-      document.getElementById('scanBtn').disabled = true;
-      document.getElementById('feedContainer').innerHTML = '';
-      document.getElementById('terminal').innerHTML = '';
-
-      for (const mod of Object.values(modules)) {
-        if (mod) {
-          const content = mod.querySelector('.module-content');
-          if (content) content.innerHTML = '<div class="spinner"></div> Loading...';
-        }
-      }
-
-      logTerminal(`Scanning: ${target}${email ? ' | Email: ' + email : ''}`);
-
-      const params = new URLSearchParams({ target, ...(email && { email }) });
-      const eventSource = new EventSource(`/api/scan?${params}`);
-
-      eventSource.addEventListener('status', (e) => {
-        const data = JSON.parse(e.data);
-        if (data.module) {
-          logTerminal(data.msg);
-        } else {
-          document.getElementById('scanStatus').textContent = data.msg;
-        }
-        if (data.done) {
-          scanning = false;
-          document.getElementById('scanBtn').disabled = false;
-          logTerminal('✓ Scan complete');
-          eventSource.close();
-        }
-      });
-
-      eventSource.addEventListener('dns', (e) => {
-        const data = JSON.parse(e.data);
-        clearModule('dns');
-        if (data.error) {
-          modules.dns.querySelector('.module-content').innerHTML = `<div class="error">Error: ${data.error}</div>`;
-          return;
-        }
-        let html = '';
-        for (const [type, records] of Object.entries(data)) {
-          if (Array.isArray(records) && records.length > 0) {
-            html += `<div><span class="record-label">${type}:</span></div>`;
-            for (const r of records) {
-              const val = r.data || r.name || JSON.stringify(r);
-              html += `<div class="record" style="margin-left: 8px;">${val}</div>`;
-            }
-          }
-        }
-        modules.dns.querySelector('.module-content').innerHTML = html || 'No records found';
-      });
-
-      eventSource.addEventListener('ports', (e) => {
-        const data = JSON.parse(e.data);
-        clearModule('ports');
-        if (data.error) {
-          modules.ports.querySelector('.module-content').innerHTML = `<div class="error">Error: ${data.error}</div>`;
-          return;
-        }
-        const open = data.filter(p => p.status === 'open');
-        const closed = data.filter(p => p.status === 'closed');
-        const filtered = data.filter(p => p.status === 'filtered');
-
-        let html = `<div><strong>Open: ${open.length}</strong></div>`;
-        for (const p of open) {
-          html += `<span class="port-chip port-open">${p.port}</span>`;
-        }
-        html += `<div style="margin-top: 8px;"><strong>Closed: ${closed.length}</strong></div>`;
-        html += `<div style="margin-top: 8px;"><strong>Filtered: ${filtered.length}</strong></div>`;
-        modules.ports.querySelector('.module-content').innerHTML = html;
-      });
-
-      eventSource.addEventListener('whois', (e) => {
-        const data = JSON.parse(e.data);
-        clearModule('whois');
-        if (data.error) {
-          modules.whois.querySelector('.module-content').innerHTML = `<div class="error">Error: ${data.error}</div>`;
-          return;
-        }
-        const p = data.parsed || {};
-        let html = '';
-        if (p.registrar) html += `<div class="record"><span class="record-label">Registrar:</span> ${p.registrar}</div>`;
-        if (p.created) html += `<div class="record"><span class="record-label">Created:</span> ${p.created}</div>`;
-        if (p.expires) html += `<div class="record"><span class="record-label">Expires:</span> ${p.expires}</div>`;
-        if (p.updated) html += `<div class="record"><span class="record-label">Updated:</span> ${p.updated}</div>`;
-        if (p.nameservers) html += `<div class="record"><span class="record-label">NS:</span> ${p.nameservers.join(', ')}</div>`;
-        if (p.privacy) html += `<div class="record"><span class="record-label">Privacy:</span> Enabled</div>`;
-        modules.whois.querySelector('.module-content').innerHTML = html || 'No WHOIS data available';
-      });
-
-      eventSource.addEventListener('subdomains', (e) => {
-        const data = JSON.parse(e.data);
-        clearModule('subdomains');
-        if (data.error) {
-          modules.subdomains.querySelector('.module-content').innerHTML = `<div class="error">Error: ${data.error}</div>`;
-          return;
-        }
-        if (!Array.isArray(data)) {
-          modules.subdomains.querySelector('.module-content').innerHTML = '<div>Error parsing subdomains</div>';
-          return;
-        }
-        const live = data.filter(s => s.live);
-        let html = `<div><strong>Live: ${live.length}</strong></div>`;
-        for (const sub of live.slice(0, 20)) {
-          html += `<div class="record">${sub.subdomain}<br><span style="color: #666;">${sub.ips.join(', ')}</span></div>`;
-        }
-        if (data.length > 20) html += `<div style="color: #888; margin-top: 4px;">... and ${data.length - 20} more</div>`;
-        modules.subdomains.querySelector('.module-content').innerHTML = html;
-      });
-
-      eventSource.addEventListener('breaches', (e) => {
-        const data = JSON.parse(e.data);
-        clearModule('breaches');
-        if (data.skipped) {
-          modules.breaches.querySelector('.module-content').innerHTML = '<div style="color: #888;">No email provided</div>';
-          return;
-        }
-        if (data.error) {
-          modules.breaches.querySelector('.module-content').innerHTML = `<div class="error">Error: ${data.error}</div>`;
-          return;
-        }
-        if (data.count === 0) {
-          modules.breaches.querySelector('.module-content').innerHTML = '<div class="success">✓ No breaches found</div>';
-          return;
-        }
-        let html = `<div class="error"><strong>Found in ${data.count} breaches:</strong></div>`;
-        for (const b of data.breaches.slice(0, 10)) {
-          html += `<div class="record">${b.Name} (${b.BreachDate})</div>`;
-        }
-        modules.breaches.querySelector('.module-content').innerHTML = html;
-      });
-
-      eventSource.addEventListener('tech', (e) => {
-        const data = JSON.parse(e.data);
-        clearModule('tech');
-        if (data.error) {
-          modules.tech.querySelector('.module-content').innerHTML = `<div class="error">Error: ${data.error}</div>`;
-          return;
-        }
-        let html = `<div style="margin-bottom: 8px;"><strong>Status: ${data.statusCode || 'N/A'}</strong></div>`;
-        if (data.tech && data.tech.length > 0) {
-          for (const t of data.tech) {
-            html += `<div class="record"><strong>${t.name}</strong><br><span style="color: #888;">${t.category}</span></div>`;
-          }
-        } else {
-          html += '<div style="color: #888;">No technologies detected</div>';
-        }
-        modules.tech.querySelector('.module-content').innerHTML = html;
-      });
-
-      eventSource.addEventListener('headers', (e) => {
-        const data = JSON.parse(e.data);
-        clearModule('headers');
-        if (data.error) {
-          modules.headers.querySelector('.module-content').innerHTML = `<div class="error">Error: ${data.error}</div>`;
-          return;
-        }
-        let html = `<div><strong>Grade: ${data.letterGrade} (${data.score}/100)</strong></div>`;
-        const missing = (data.audit || []).filter(h => !h.present);
-        if (missing.length > 0) {
-          html += `<div style="color: #ff6b6b; margin-top: 6px;">Missing ${missing.length}:</div>`;
-          for (const h of missing.slice(0, 5)) {
-            html += `<div class="record">${h.name}</div>`;
-          }
-        }
-        modules.headers.querySelector('.module-content').innerHTML = html;
-      });
-
-      eventSource.addEventListener('findings', (e) => {
-        const findings = JSON.parse(e.data);
-        for (const f of findings) {
-          addFinding(f.severity, f.title, f.detail, f.module);
-        }
-      });
-
-      eventSource.addEventListener('error', () => {
-        logTerminal('Connection error', true);
-        scanning = false;
-        document.getElementById('scanBtn').disabled = false;
-        eventSource.close();
-      });
-    }
-
-    // Init
-    updateClock();
-    setInterval(updateClock, 1000);
-  </script>
+    } catch {}
+  })();
+</script>
 </body>
 </html>

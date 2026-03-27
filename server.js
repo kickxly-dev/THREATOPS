@@ -6,431 +6,768 @@ const net = require('net');
 const dns = require('dns').promises;
 const fetch = require('node-fetch');
 const whois = require('whois');
-const https = require('https');
-const http = require('http');
+const tls = require('tls');
+const fs = require('fs').promises;
+const fsSync = require('fs');
+const crypto = require('crypto');
 const { URL } = require('url');
 const path = require('path');
+const { Pool } = require('pg');
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+
+// ─── POSTGRES POOL ────────────────────────────────────────────────────────────
+const pool = process.env.DATABASE_URL
+  ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
+  : null;
+
+// ─── FILE-BASED STORAGE (fallback when no DATABASE_URL) ──────────────────────
+const DATA_DIR = path.join(__dirname, 'data');
+const HISTORY_DIR = path.join(__dirname, 'history');
+fsSync.mkdirSync(DATA_DIR, { recursive: true });
+fsSync.mkdirSync(HISTORY_DIR, { recursive: true });
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+
+function fileLoadUsers() {
+  try { return JSON.parse(fsSync.readFileSync(USERS_FILE, 'utf8')); } catch { return []; }
+}
+async function fileSaveUsers(users) {
+  await fs.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
+}
+
+// ─── DB INIT ─────────────────────────────────────────────────────────────────
+async function initDB() {
+  if (!pool) {
+    // File mode: load config into process.env
+    try {
+      const cfg = JSON.parse(fsSync.readFileSync(CONFIG_FILE, 'utf8'));
+      for (const [k, v] of Object.entries(cfg)) { if (v) process.env[k] = v; }
+    } catch {}
+    return;
+  }
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      username TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      onboarded BOOLEAN DEFAULT FALSE
+    );
+    CREATE TABLE IF NOT EXISTS scan_history (
+      id TEXT PRIMARY KEY,
+      ts TIMESTAMPTZ DEFAULT NOW(),
+      target TEXT NOT NULL,
+      email TEXT,
+      total_findings INT DEFAULT 0,
+      high_count INT DEFAULT 0,
+      medium_count INT DEFAULT 0,
+      low_count INT DEFAULT 0,
+      info_count INT DEFAULT 0,
+      results JSONB,
+      findings JSONB
+    );
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
+  // Load API keys from DB into process.env
+  const { rows } = await pool.query('SELECT key, value FROM settings');
+  for (const { key, value } of rows) { if (value) process.env[key] = value; }
+}
+
+// ─── DUAL-MODE USER OPERATIONS ───────────────────────────────────────────────
+async function dbFindUser(username) {
+  if (!pool) {
+    return fileLoadUsers().find(u => u.username.toLowerCase() === username.toLowerCase()) || null;
+  }
+  const { rows } = await pool.query(
+    'SELECT id, username, password_hash AS "passwordHash", onboarded, created_at AS "createdAt" FROM users WHERE LOWER(username) = LOWER($1)',
+    [username]
+  );
+  return rows[0] || null;
+}
+
+async function dbFindUserById(id) {
+  if (!pool) {
+    return fileLoadUsers().find(u => u.id === id) || null;
+  }
+  const { rows } = await pool.query(
+    'SELECT id, username, password_hash AS "passwordHash", onboarded, created_at AS "createdAt" FROM users WHERE id = $1',
+    [id]
+  );
+  return rows[0] || null;
+}
+
+async function dbCreateUser(user) {
+  if (!pool) {
+    const users = fileLoadUsers();
+    if (users.find(u => u.username.toLowerCase() === user.username.toLowerCase())) return false;
+    users.push(user);
+    await fileSaveUsers(users);
+    return true;
+  }
+  try {
+    await pool.query(
+      'INSERT INTO users (id, username, password_hash, onboarded) VALUES ($1, $2, $3, $4)',
+      [user.id, user.username, user.passwordHash, user.onboarded || false]
+    );
+    return true;
+  } catch (e) {
+    if (e.code === '23505') return false; // unique violation
+    throw e;
+  }
+}
+
+async function dbSetOnboarded(userId) {
+  if (!pool) {
+    const users = fileLoadUsers();
+    const user = users.find(u => u.id === userId);
+    if (!user) return false;
+    user.onboarded = true;
+    await fileSaveUsers(users);
+    return true;
+  }
+  await pool.query('UPDATE users SET onboarded = TRUE WHERE id = $1', [userId]);
+  return true;
+}
+
+// ─── DUAL-MODE SETTINGS ───────────────────────────────────────────────────────
+async function dbSaveSettings(updates) {
+  if (!pool) {
+    let cfg = {};
+    try { cfg = JSON.parse(await fs.readFile(CONFIG_FILE, 'utf8')); } catch {}
+    Object.assign(cfg, updates);
+    await fs.writeFile(CONFIG_FILE, JSON.stringify(cfg, null, 2));
+    return;
+  }
+  for (const [key, value] of Object.entries(updates)) {
+    await pool.query(
+      'INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2',
+      [key, value]
+    );
+  }
+}
+
+// ─── DUAL-MODE HISTORY ────────────────────────────────────────────────────────
+async function dbSaveHistory(id, target, email, results, findings) {
+  const counts = { high: 0, medium: 0, low: 0, info: 0 };
+  for (const f of findings) counts[f.severity] = (counts[f.severity] || 0) + 1;
+  if (!pool) {
+    try {
+      await fs.writeFile(
+        path.join(HISTORY_DIR, `${id}.json`),
+        JSON.stringify({ id, ts: new Date().toISOString(), target, email: email || null, total: findings.length, ...counts, results, findings })
+      );
+    } catch {}
+    return;
+  }
+  try {
+    await pool.query(
+      `INSERT INTO scan_history (id, target, email, total_findings, high_count, medium_count, low_count, info_count, results, findings)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [id, target, email || null, findings.length, counts.high, counts.medium, counts.low, counts.info, JSON.stringify(results), JSON.stringify(findings)]
+    );
+  } catch {}
+}
+
+async function dbGetHistory() {
+  if (!pool) {
+    try {
+      const files = (await fs.readdir(HISTORY_DIR)).filter(f => f.endsWith('.json')).sort().reverse().slice(0, 100);
+      const items = await Promise.allSettled(files.map(async f => {
+        const d = JSON.parse(await fs.readFile(path.join(HISTORY_DIR, f), 'utf8'));
+        return { id: d.id, ts: d.ts, target: d.target, total: d.total, high: d.high, medium: d.medium, low: d.low, info: d.info };
+      }));
+      return items.filter(r => r.status === 'fulfilled').map(r => r.value);
+    } catch { return []; }
+  }
+  const { rows } = await pool.query(
+    `SELECT id, ts, target, total_findings AS total, high_count AS high, medium_count AS medium, low_count AS low, info_count AS info
+     FROM scan_history ORDER BY ts DESC LIMIT 100`
+  );
+  return rows;
+}
+
+async function dbGetHistoryItem(id) {
+  if (!pool) {
+    const safe = id.replace(/[^a-z0-9]/gi, '');
+    return JSON.parse(await fs.readFile(path.join(HISTORY_DIR, `${safe}.json`), 'utf8'));
+  }
+  const { rows } = await pool.query('SELECT * FROM scan_history WHERE id = $1', [id]);
+  if (!rows[0]) throw new Error('Not found');
+  const r = rows[0];
+  return { id: r.id, ts: r.ts, target: r.target, email: r.email, total: r.total_findings, high: r.high_count, medium: r.medium_count, low: r.low_count, info: r.info_count, results: r.results, findings: r.findings };
+}
+
+async function dbDeleteHistory(id) {
+  if (!pool) {
+    const safe = id.replace(/[^a-z0-9]/gi, '');
+    await fs.unlink(path.join(HISTORY_DIR, `${safe}.json`));
+    return;
+  }
+  const { rowCount } = await pool.query('DELETE FROM scan_history WHERE id = $1', [id]);
+  if (!rowCount) throw new Error('Not found');
+}
+
+// ─── PASSWORD UTILS ───────────────────────────────────────────────────────────
+async function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = await new Promise((resolve, reject) => {
+    crypto.scrypt(password, salt, 64, (err, d) => err ? reject(err) : resolve(d.toString('hex')));
+  });
+  return `${salt}:${hash}`;
+}
+
+async function verifyPassword(password, stored) {
+  const [salt, hash] = stored.split(':');
+  return new Promise((resolve) => {
+    crypto.scrypt(password, salt, 64, (err, d) => {
+      if (err) return resolve(false);
+      try { resolve(crypto.timingSafeEqual(Buffer.from(hash, 'hex'), d)); } catch { resolve(false); }
+    });
+  });
+}
+
+// ─── SESSIONS ────────────────────────────────────────────────────────────────
+const sessions = new Map();
+
+function parseCookies(header) {
+  const c = {}; if (!header) return c;
+  for (const p of header.split(';')) { const [k, ...v] = p.trim().split('='); c[k.trim()] = v.join('=').trim(); }
+  return c;
+}
+
+function createSession(userId, username) {
+  const token = crypto.randomBytes(32).toString('hex');
+  sessions.set(token, { userId, username, expiry: Date.now() + 24 * 60 * 60 * 1000 });
+  return token;
+}
+
+function getSession(req) {
+  const token = parseCookies(req.headers.cookie)['to_session'];
+  if (!token) return null;
+  const s = sessions.get(token);
+  if (!s || Date.now() > s.expiry) { sessions.delete(token); return null; }
+  return s;
+}
+
+setInterval(() => { const now = Date.now(); for (const [t, s] of sessions) if (now > s.expiry) sessions.delete(t); }, 60 * 60 * 1000);
+
+// ─── RATE LIMITER ────────────────────────────────────────────────────────────
+const rateLimits = new Map();
+const RATE_LIMIT = parseInt(process.env.RATE_LIMIT || '10');
+function rateLimit(req, res, next) {
+  const ip = req.ip || 'unknown';
+  const now = Date.now();
+  const r = rateLimits.get(ip);
+  if (!r || now > r.resetAt) { rateLimits.set(ip, { count: 1, resetAt: now + 60000 }); return next(); }
+  if (r.count >= RATE_LIMIT) return res.status(429).json({ error: `Rate limit exceeded. Retry in ${Math.ceil((r.resetAt - now) / 1000)}s` });
+  r.count++;
+  next();
+}
+setInterval(() => { const now = Date.now(); for (const [ip, r] of rateLimits) if (now > r.resetAt) rateLimits.delete(ip); }, 5 * 60 * 1000);
+
+// ─── AUTH MIDDLEWARE ─────────────────────────────────────────────────────────
+function requireAuth(req, res, next) {
+  req.user = getSession(req);
+  if (req.user) return next();
+  if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
+  res.redirect('/login');
+}
+
+// ─── LOGIN PAGE ──────────────────────────────────────────────────────────────
+const loginPage = (opts = {}) => `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>THREATOPS // ACCESS</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#050507;color:#e0e0e8;font-family:'JetBrains Mono',monospace;min-height:100vh;display:flex;align-items:center;justify-content:center;background-image:radial-gradient(circle at 20% 50%, rgba(255,42,42,0.04) 0%, transparent 50%), radial-gradient(circle at 80% 20%, rgba(0,200,255,0.03) 0%, transparent 50%)}
+.wrap{width:100%;max-width:420px;padding:20px}
+.logo{font-family:'Share Tech Mono',monospace;font-size:22px;color:#ff2a2a;letter-spacing:4px;margin-bottom:4px}
+.tagline{font-size:10px;color:#444458;letter-spacing:1px;margin-bottom:32px}
+.card{background:#0a0a0e;border:1px solid #1a1a24;border-top:2px solid #ff2a2a;padding:28px}
+.tabs{display:flex;margin-bottom:24px;border-bottom:1px solid #1a1a24}
+.tab{flex:1;text-align:center;padding:8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;cursor:pointer;color:#444458;border-bottom:2px solid transparent;transition:all .15s}
+.tab.active{color:#ff2a2a;border-bottom-color:#ff2a2a}
+.field{margin-bottom:14px}
+label{display:block;font-size:9.5px;color:#8888a0;letter-spacing:1px;text-transform:uppercase;margin-bottom:5px}
+input{width:100%;padding:9px 10px;background:#0f0f14;border:1px solid #1a1a24;color:#e0e0e8;font-family:'JetBrains Mono',monospace;font-size:12px;outline:none;transition:border-color .15s}
+input:focus{border-color:#00c8ff}
+input::placeholder{color:#444458}
+.hint{font-size:9px;color:#444458;margin-top:3px}
+.btn{width:100%;padding:10px;background:#ff2a2a;border:none;color:#fff;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;letter-spacing:1.5px;cursor:pointer;text-transform:uppercase;transition:background .15s;margin-top:4px}
+.btn:hover{background:#ff4444;box-shadow:0 0 14px rgba(255,42,42,.3)}
+.err{color:#ff6b6b;font-size:10px;margin-top:10px;padding:7px 9px;background:rgba(255,42,42,.08);border-left:3px solid #ff2a2a}
+.ok{color:#00e676;font-size:10px;margin-top:10px;padding:7px 9px;background:rgba(0,230,118,.08);border-left:3px solid #00e676}
+.form-section{display:none}.form-section.active{display:block}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="logo">⚔ THREATOPS</div>
+  <div class="tagline">THREAT INTELLIGENCE PLATFORM</div>
+  <div class="card">
+    <div class="tabs">
+      <div class="tab ${opts.tab !== 'register' ? 'active' : ''}" onclick="switchTab('login')">Sign In</div>
+      <div class="tab ${opts.tab === 'register' ? 'active' : ''}" onclick="switchTab('register')">Create Account</div>
+    </div>
+    <div class="form-section ${opts.tab !== 'register' ? 'active' : ''}" id="login-form">
+      <form method="POST" action="/api/login">
+        <div class="field"><label>Username</label><input type="text" name="username" autocomplete="username" required autofocus></div>
+        <div class="field"><label>Password</label><input type="password" name="password" autocomplete="current-password" required></div>
+        <button class="btn" type="submit">Authenticate</button>
+        ${opts.loginErr ? `<div class="err">${opts.loginErr}</div>` : ''}
+      </form>
+    </div>
+    <div class="form-section ${opts.tab === 'register' ? 'active' : ''}" id="register-form">
+      <form method="POST" action="/api/register">
+        <div class="field"><label>Username</label><input type="text" name="username" autocomplete="username" pattern="[a-zA-Z0-9_]{3,20}" required><div class="hint">3–20 chars, letters/numbers/underscore</div></div>
+        <div class="field"><label>Password</label><input type="password" name="password" autocomplete="new-password" minlength="8" required><div class="hint">Minimum 8 characters</div></div>
+        <div class="field"><label>Confirm Password</label><input type="password" name="confirm" autocomplete="new-password" required></div>
+        <button class="btn" type="submit">Create Account</button>
+        ${opts.registerErr ? `<div class="err">${opts.registerErr}</div>` : ''}
+        ${opts.registerOk ? `<div class="ok">${opts.registerOk}</div>` : ''}
+      </form>
+    </div>
+  </div>
+</div>
+<script>
+function switchTab(t) {
+  document.querySelectorAll('.tab').forEach((el,i)=>el.classList.toggle('active', (t==='login'&&i===0)||(t==='register'&&i===1)));
+  document.querySelectorAll('.form-section').forEach((el,i)=>el.classList.toggle('active',(t==='login'&&i===0)||(t==='register'&&i===1)));
+}
+${opts.autoTab ? `switchTab('${opts.autoTab}');` : ''}
+</script>
+</body></html>`;
+
+// ─── AUTH ROUTES ─────────────────────────────────────────────────────────────
+app.get('/login', (req, res) => {
+  if (getSession(req)) return res.redirect('/');
+  res.send(loginPage({ tab: req.query.tab }));
+});
+
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.send(loginPage({ loginErr: 'Username and password required.' }));
+  const user = await dbFindUser(username).catch(() => null);
+  if (!user || !(await verifyPassword(password, user.passwordHash))) {
+    return res.send(loginPage({ loginErr: 'Invalid username or password.' }));
+  }
+  const token = createSession(user.id, user.username);
+  res.setHeader('Set-Cookie', `to_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`);
+  res.redirect('/');
+});
+
+app.post('/api/register', async (req, res) => {
+  const { username, password, confirm } = req.body;
+  if (!username || !password || !confirm)
+    return res.send(loginPage({ tab: 'register', registerErr: 'All fields required.' }));
+  if (!/^[a-zA-Z0-9_]{3,20}$/.test(username))
+    return res.send(loginPage({ tab: 'register', registerErr: 'Username must be 3–20 alphanumeric characters.' }));
+  if (password.length < 8)
+    return res.send(loginPage({ tab: 'register', registerErr: 'Password must be at least 8 characters.' }));
+  if (password !== confirm)
+    return res.send(loginPage({ tab: 'register', registerErr: 'Passwords do not match.' }));
+  const newUser = {
+    id: crypto.randomBytes(8).toString('hex'),
+    username,
+    passwordHash: await hashPassword(password),
+    createdAt: new Date().toISOString(),
+    onboarded: false,
+  };
+  const created = await dbCreateUser(newUser).catch(() => false);
+  if (!created) return res.send(loginPage({ tab: 'register', registerErr: 'Username already taken.' }));
+  const token = createSession(newUser.id, newUser.username);
+  res.setHeader('Set-Cookie', `to_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`);
+  res.redirect('/');
+});
+
+app.get('/api/logout', (req, res) => {
+  const token = parseCookies(req.headers.cookie)['to_session'];
+  if (token) sessions.delete(token);
+  res.setHeader('Set-Cookie', 'to_session=; Max-Age=0; Path=/');
+  res.redirect('/login');
+});
+
+app.get('/api/me', requireAuth, async (req, res) => {
+  const user = await dbFindUserById(req.user.userId).catch(() => null);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  res.json({ id: user.id, username: user.username, onboarded: user.onboarded, createdAt: user.createdAt });
+});
+
+app.post('/api/onboarding/complete', requireAuth, async (req, res) => {
+  await dbSetOnboarded(req.user.userId).catch(() => {});
+  res.json({ ok: true });
+});
+
+// ─── SETTINGS (API KEYS) ──────────────────────────────────────────────────────
+app.get('/api/settings', requireAuth, (req, res) => {
+  res.json({
+    HIBP_API_KEY: process.env.HIBP_API_KEY ? '••••••••' : '',
+    ABUSEIPDB_API_KEY: process.env.ABUSEIPDB_API_KEY ? '••••••••' : '',
+    SHODAN_API_KEY: process.env.SHODAN_API_KEY ? '••••••••' : '',
+    hibpConfigured: !!(process.env.HIBP_API_KEY && process.env.HIBP_API_KEY !== 'your_hibp_key_here'),
+    abuseConfigured: !!(process.env.ABUSEIPDB_API_KEY && process.env.ABUSEIPDB_API_KEY !== 'your_abuseipdb_key_here'),
+    shodanConfigured: !!(process.env.SHODAN_API_KEY && process.env.SHODAN_API_KEY !== 'your_shodan_key_here'),
+  });
+});
+
+app.post('/api/settings', requireAuth, async (req, res) => {
+  const allowed = ['HIBP_API_KEY', 'ABUSEIPDB_API_KEY', 'SHODAN_API_KEY'];
+  const updates = {};
+  for (const key of allowed) {
+    if (req.body[key] !== undefined && req.body[key] !== '••••••••' && req.body[key] !== '') {
+      updates[key] = req.body[key];
+      process.env[key] = req.body[key];
+    }
+  }
+  await dbSaveSettings(updates).catch(() => {});
+  res.json({ ok: true });
+});
+
+// ─── STATIC FILES (require auth) ─────────────────────────────────────────────
+app.use(requireAuth);
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── DNS ENUMERATION ────────────────────────────────────────────────────────
 async function dnsEnumerate(domain) {
-  const types = ['A', 'MX', 'TXT', 'NS', 'CNAME'];
+  const types = ['A', 'AAAA', 'MX', 'TXT', 'NS', 'CNAME', 'SOA'];
   const results = {};
-  await Promise.allSettled(
-    types.map(async (type) => {
-      try {
-        const url = `https://dns.google/resolve?name=${encodeURIComponent(domain)}&type=${type}`;
-        const res = await fetch(url, { timeout: 8000 });
-        const data = await res.json();
-        results[type] = data.Answer || data.Authority || [];
-      } catch {
-        results[type] = [];
-      }
-    })
-  );
+  await Promise.allSettled(types.map(async (type) => {
+    try {
+      const res = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(domain)}&type=${type}`, { timeout: 8000 });
+      const data = await res.json();
+      results[type] = data.Answer || data.Authority || [];
+    } catch { results[type] = []; }
+  }));
   return results;
 }
 
 // ─── PORT SCANNER ───────────────────────────────────────────────────────────
 const TOP_PORTS = [
-  21, 22, 23, 25, 53, 80, 110, 111, 135, 139,
-  143, 443, 445, 993, 995, 1723, 3306, 3389, 5900,
-  6379, 8080, 8443, 27017, 5432, 5000
+  {port:21,service:'FTP'},{port:22,service:'SSH'},{port:23,service:'Telnet'},
+  {port:25,service:'SMTP'},{port:53,service:'DNS'},{port:80,service:'HTTP'},
+  {port:110,service:'POP3'},{port:135,service:'RPC'},{port:139,service:'NetBIOS'},
+  {port:143,service:'IMAP'},{port:443,service:'HTTPS'},{port:445,service:'SMB'},
+  {port:993,service:'IMAPS'},{port:995,service:'POP3S'},{port:1433,service:'MSSQL'},
+  {port:1723,service:'PPTP'},{port:3306,service:'MySQL'},{port:3389,service:'RDP'},
+  {port:5432,service:'PostgreSQL'},{port:5900,service:'VNC'},{port:6379,service:'Redis'},
+  {port:8080,service:'HTTP-Alt'},{port:8443,service:'HTTPS-Alt'},{port:8888,service:'HTTP-Dev'},
+  {port:27017,service:'MongoDB'},
 ];
 
-function scanPort(host, port, timeout = 2500) {
+function scanPort(host, port, timeout = 2000) {
   return new Promise((resolve) => {
-    const sock = new net.Socket();
-    let status = 'closed';
+    const sock = new net.Socket(); let done = false;
+    const finish = (s) => { if (done) return; done = true; sock.destroy(); resolve(s); };
     sock.setTimeout(timeout);
-    sock.on('connect', () => { status = 'open'; sock.destroy(); });
-    sock.on('timeout', () => { status = 'filtered'; sock.destroy(); });
-    sock.on('error', (e) => {
-      status = e.code === 'ECONNREFUSED' ? 'closed' : 'filtered';
-      sock.destroy();
-    });
-    sock.on('close', () => resolve({ port, status }));
-    sock.connect(port, host);
+    sock.on('connect', () => finish('open'));
+    sock.on('timeout', () => finish('filtered'));
+    sock.on('error', (e) => finish(e.code === 'ECONNREFUSED' ? 'closed' : 'filtered'));
+    sock.on('close', () => { if (!done) finish('filtered'); });
+    try { sock.connect(port, host); } catch { finish('error'); }
   });
 }
 
 async function portScan(host) {
-  const results = await Promise.all(TOP_PORTS.map(p => scanPort(host, p)));
-  return results;
+  const results = await Promise.allSettled(TOP_PORTS.map(async ({ port, service }) => ({ port, service, status: await scanPort(host, port) })));
+  return results.map(r => r.value || { port: 0, service: 'unknown', status: 'error' });
 }
 
 // ─── WHOIS ──────────────────────────────────────────────────────────────────
 function doWhois(domain) {
   return new Promise((resolve) => {
-    whois.lookup(domain, { timeout: 10000 }, (err, data) => {
-      if (err) return resolve({ raw: '', error: err.message });
-      resolve({ raw: data || '' });
+    const t = setTimeout(() => resolve({ raw: '', error: 'timeout' }), 10000);
+    try { whois.lookup(domain, (err, data) => { clearTimeout(t); resolve(err ? { raw: '', error: err.message } : { raw: data || '' }); }); }
+    catch (e) { clearTimeout(t); resolve({ raw: '', error: e.message }); }
+  });
+}
+function parseWhoisFields(raw) {
+  const f = {};
+  const P = { registrar: /registrar:\s*(.+)/i, created: /creat(?:ion|ed)[^\:]*:\s*(.+)/i, expires: /expir(?:y|ation|es)[^\:]*:\s*(.+)/i, updated: /updat(?:ed|e)[^\:]*:\s*(.+)/i, nameservers: /name\s*server:\s*(.+)/gi, registrant: /registrant(?:\s+organization)?:\s*(.+)/i, privacy: /privacy|redacted|protected|masked/i };
+  for (const [k, rx] of Object.entries(P)) {
+    if (k === 'nameservers') f.nameservers = [...new Set([...raw.matchAll(rx)].map(m => m[1].trim()))];
+    else if (k === 'privacy') f.privacy = rx.test(raw);
+    else { const m = raw.match(rx); if (m) f[k] = m[1].trim(); }
+  }
+  return f;
+}
+
+// ─── SSL/TLS ─────────────────────────────────────────────────────────────────
+function checkSSL(host) {
+  return new Promise((resolve) => {
+    const sock = tls.connect(443, host, { servername: host, rejectUnauthorized: false }, () => {
+      try {
+        const cert = sock.getPeerCertificate(true), cipher = sock.getCipher(), proto = sock.getProtocol();
+        sock.destroy();
+        if (!cert?.subject) return resolve({ error: 'No certificate' });
+        resolve({ subject: cert.subject, issuer: cert.issuer, validFrom: cert.valid_from, validTo: cert.valid_to, daysRemaining: Math.floor((new Date(cert.valid_to) - Date.now()) / 86400000), subjectAltNames: cert.subjectaltname || '', fingerprint: cert.fingerprint || '', cipher: cipher ? cipher.name : 'unknown', protocol: proto || 'unknown', selfSigned: !!(cert.issuer && cert.subject && cert.issuer.CN === cert.subject.CN) });
+      } catch (e) { sock.destroy(); resolve({ error: e.message }); }
     });
+    sock.setTimeout(8000, () => { sock.destroy(); resolve({ error: 'timeout' }); });
+    sock.on('error', e => resolve({ error: e.message }));
   });
 }
 
-function parseWhoisFields(raw) {
-  const fields = {};
-  const patterns = {
-    registrar: /registrar:\s*(.+)/i,
-    created: /creat(?:ion|ed)[^\:]*:\s*(.+)/i,
-    expires: /expir(?:y|ation|es)[^\:]*:\s*(.+)/i,
-    updated: /updat(?:ed|e)[^\:]*:\s*(.+)/i,
-    status: /status:\s*(.+)/i,
-    nameservers: /name\s*server:\s*(.+)/gi,
-    registrant: /registrant(?:\s+organization)?:\s*(.+)/i,
-    privacy: /privacy|redacted|protected|masked/i,
-  };
+// ─── GEOIP ───────────────────────────────────────────────────────────────────
+async function geoIPLookup(domain) {
+  try {
+    const addrs = await dns.resolve4(domain).catch(() => []);
+    if (!addrs.length) return { error: 'Could not resolve to IP' };
+    const ip = addrs[0];
+    const res = await fetch(`http://ip-api.com/json/${ip}?fields=status,message,country,countryCode,regionName,city,isp,org,as,asname,reverse,proxy,hosting,query`, { timeout: 8000 });
+    const data = await res.json();
+    return data.status === 'fail' ? { error: data.message, ip } : { ...data, resolvedIP: ip };
+  } catch (e) { return { error: e.message }; }
+}
 
-  for (const [key, rx] of Object.entries(patterns)) {
-    if (key === 'nameservers') {
-      const matches = [...raw.matchAll(rx)].map(m => m[1].trim());
-      fields.nameservers = [...new Set(matches)];
-    } else if (key === 'privacy') {
-      fields.privacy = rx.test(raw);
-    } else {
-      const m = raw.match(rx);
-      if (m) fields[key] = m[1].trim();
-    }
-  }
-  return fields;
+// ─── WAF DETECTION ───────────────────────────────────────────────────────────
+async function detectWAF(targetUrl) {
+  try {
+    const url = targetUrl.startsWith('http') ? targetUrl : `https://${targetUrl}`;
+    const res = await fetch(url, { timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; THREATOPS/1.0)' }, redirect: 'follow' });
+    const headers = {}; res.headers.forEach((v, k) => { headers[k] = v; });
+    const cookies = headers['set-cookie'] || '', server = headers['server'] || '';
+    const det = []; const add = (n, e) => { if (!det.find(w => w.name === n)) det.push({ name: n, evidence: e }); };
+    if (headers['cf-ray']) add('Cloudflare', 'cf-ray header');
+    if (/cloudflare/i.test(server)) add('Cloudflare', 'Server header');
+    if (/cf_clearance|__cfduid/i.test(cookies)) add('Cloudflare', 'Cookie');
+    if (headers['x-sucuri-id'] || headers['x-sucuri-cache']) add('Sucuri', 'Sucuri header');
+    if (/imperva|incapsula/i.test(server)) add('Imperva', 'Server header');
+    if (/incap_ses|visid_incap/i.test(cookies)) add('Imperva', 'Cookie');
+    if (/barracuda/i.test(server)) add('Barracuda', 'Server header');
+    if (/f5|big-ip/i.test(server)) add('F5 BIG-IP', 'Server header');
+    if (/BIGipServer/i.test(cookies)) add('F5 BIG-IP', 'Cookie');
+    if (/mod_security|modsecurity/i.test(server)) add('ModSecurity', 'Server header');
+    if (headers['x-akamai-transformed']) add('Akamai', 'Header');
+    return { detected: det.length > 0, wafs: det, statusCode: res.status };
+  } catch (e) { return { error: e.message, detected: false, wafs: [] }; }
 }
 
 // ─── SUBDOMAIN DISCOVERY ────────────────────────────────────────────────────
 async function subdomainDiscovery(domain) {
   try {
-    const url = `https://crt.sh/?q=%25.${encodeURIComponent(domain)}&output=json`;
-    const res = await fetch(url, { timeout: 15000 });
-    if (!res.ok) throw new Error(`crt.sh returned ${res.status}`);
+    const res = await fetch(`https://crt.sh/?q=%25.${encodeURIComponent(domain)}&output=json`, { timeout: 15000 });
+    if (!res.ok) throw new Error(`crt.sh ${res.status}`);
     const data = await res.json();
-
     const subs = new Set();
-    for (const entry of data) {
-      const names = (entry.name_value || '').split('\n');
-      for (const n of names) {
-        const clean = n.replace(/^\*\./, '').trim().toLowerCase();
-        if (clean.endsWith(domain) && clean !== domain) subs.add(clean);
-      }
+    for (const e of data) for (const n of (e.name_value || '').split('\n')) {
+      const c = n.replace(/^\*\./, '').trim().toLowerCase();
+      if (c.endsWith(domain) && c !== domain) subs.add(c);
     }
-
-    // Resolve each subdomain
     const list = [...subs].slice(0, 50);
-    const resolved = await Promise.allSettled(
-      list.map(async (sub) => {
-        try {
-          const addrs = await dns.resolve4(sub);
-          return { subdomain: sub, ips: addrs, live: true };
-        } catch {
-          return { subdomain: sub, ips: [], live: false };
-        }
-      })
-    );
+    const resolved = await Promise.allSettled(list.map(async sub => {
+      try { return { subdomain: sub, ips: await dns.resolve4(sub), live: true }; }
+      catch { return { subdomain: sub, ips: [], live: false }; }
+    }));
     return resolved.map(r => r.value || r.reason);
-  } catch (e) {
-    return { error: e.message };
-  }
+  } catch (e) { return { error: e.message }; }
 }
 
 // ─── BREACH CHECK ───────────────────────────────────────────────────────────
 async function breachCheck(email) {
   const key = process.env.HIBP_API_KEY;
-  if (!key || key === 'your_hibp_key_here') {
-    return { error: 'No HIBP API key configured in .env' };
-  }
+  if (!key || key === 'your_hibp_key_here') return { error: 'No HIBP API key configured' };
   try {
-    const res = await fetch(
-      `https://haveibeenpwned.com/api/v3/breachedaccount/${encodeURIComponent(email)}?truncateResponse=false`,
-      {
-        headers: {
-          'hibp-api-key': key,
-          'User-Agent': 'THREATOPS-Dashboard',
-        },
-        timeout: 10000,
-      }
-    );
+    const res = await fetch(`https://haveibeenpwned.com/api/v3/breachedaccount/${encodeURIComponent(email)}?truncateResponse=false`, { headers: { 'hibp-api-key': key, 'User-Agent': 'THREATOPS-Dashboard' }, timeout: 10000 });
     if (res.status === 404) return { breaches: [], count: 0 };
     if (res.status === 401) return { error: 'Invalid HIBP API key' };
     if (!res.ok) return { error: `HIBP error: ${res.status}` };
-    const breaches = await res.json();
-    return { breaches, count: breaches.length };
-  } catch (e) {
-    return { error: e.message };
-  }
+    const b = await res.json(); return { breaches: b, count: b.length };
+  } catch (e) { return { error: e.message }; }
 }
 
-// ─── TECH STACK DETECTION ───────────────────────────────────────────────────
+// ─── TECH STACK ──────────────────────────────────────────────────────────────
 async function techStackDetect(targetUrl) {
   try {
-    const normalizedUrl = targetUrl.startsWith('http') ? targetUrl : `https://${targetUrl}`;
-    const res = await fetch(normalizedUrl, {
-      timeout: 10000,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; THREATOPS/1.0)' },
-      redirect: 'follow',
-    });
-
-    const headers = {};
-    res.headers.forEach((val, key) => { headers[key] = val; });
+    const url = targetUrl.startsWith('http') ? targetUrl : `https://${targetUrl}`;
+    const res = await fetch(url, { timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; THREATOPS/1.0)' }, redirect: 'follow' });
+    const headers = {}; res.headers.forEach((v, k) => { headers[k] = v; });
     const body = await res.text();
-
     const tech = [];
-
-    // Server header
     if (headers['server']) tech.push({ name: headers['server'], category: 'Server', confidence: 'high' });
-
-    // X-Powered-By
     if (headers['x-powered-by']) tech.push({ name: headers['x-powered-by'], category: 'Runtime', confidence: 'high' });
-
-    // Cookies
-    const setCookie = headers['set-cookie'] || '';
-    if (/PHPSESSID/i.test(setCookie)) tech.push({ name: 'PHP', category: 'Language', confidence: 'high' });
-    if (/JSESSIONID/i.test(setCookie)) tech.push({ name: 'Java/Servlet', category: 'Runtime', confidence: 'high' });
-    if (/laravel_session|XSRF-TOKEN/i.test(setCookie)) tech.push({ name: 'Laravel', category: 'Framework', confidence: 'high' });
-    if (/django_csrftoken|csrftoken/i.test(setCookie)) tech.push({ name: 'Django', category: 'Framework', confidence: 'high' });
-    if (/wp-settings|wordpress/i.test(setCookie)) tech.push({ name: 'WordPress', category: 'CMS', confidence: 'high' });
-
-    // HTML patterns
-    const htmlPatterns = [
+    const sc = headers['set-cookie'] || '';
+    if (/PHPSESSID/i.test(sc)) tech.push({ name: 'PHP', category: 'Language', confidence: 'high' });
+    if (/JSESSIONID/i.test(sc)) tech.push({ name: 'Java/Servlet', category: 'Runtime', confidence: 'high' });
+    if (/laravel_session|XSRF-TOKEN/i.test(sc)) tech.push({ name: 'Laravel', category: 'Framework', confidence: 'high' });
+    if (/django_csrftoken|csrftoken/i.test(sc)) tech.push({ name: 'Django', category: 'Framework', confidence: 'high' });
+    const pats = [
       { rx: /wp-content|wp-includes/i, name: 'WordPress', category: 'CMS' },
       { rx: /Drupal\.settings|\/sites\/default\/files/i, name: 'Drupal', category: 'CMS' },
       { rx: /Joomla!/i, name: 'Joomla', category: 'CMS' },
       { rx: /shopify/i, name: 'Shopify', category: 'Ecommerce' },
       { rx: /magento/i, name: 'Magento', category: 'Ecommerce' },
-      { rx: /react\.(?:development|production|min)\.js|__REACT_DEVTOOLS/i, name: 'React', category: 'JS Framework' },
-      { rx: /vue(?:\.min)?\.js|__vue__/i, name: 'Vue.js', category: 'JS Framework' },
-      { rx: /angular(?:\.min)?\.js|ng-version/i, name: 'Angular', category: 'JS Framework' },
+      { rx: /_reactRootContainer|__REACT_DEVTOOLS|react\.production\.min/i, name: 'React', category: 'JS Framework' },
+      { rx: /vue(?:\.min)?\.js|__vue__|Vue\.config/i, name: 'Vue.js', category: 'JS Framework' },
+      { rx: /ng-version|angular(?:\.min)?\.js/i, name: 'Angular', category: 'JS Framework' },
       { rx: /jquery(?:\.min)?\.js/i, name: 'jQuery', category: 'JS Library' },
       { rx: /bootstrap(?:\.min)?\.(?:css|js)/i, name: 'Bootstrap', category: 'CSS Framework' },
-      { rx: /next\.js|__NEXT_DATA__/i, name: 'Next.js', category: 'Framework' },
-      { rx: /nuxt/i, name: 'Nuxt.js', category: 'Framework' },
-      { rx: /gatsby/i, name: 'Gatsby', category: 'Framework' },
-      { rx: /<meta[^>]+generator[^>]+WordPress/i, name: 'WordPress', category: 'CMS' },
-      { rx: /<meta[^>]+generator[^>]+Joomla/i, name: 'Joomla', category: 'CMS' },
-      { rx: /<meta[^>]+generator[^>]+Drupal/i, name: 'Drupal', category: 'CMS' },
+      { rx: /__NEXT_DATA__|_next\/static/i, name: 'Next.js', category: 'SSR Framework' },
+      { rx: /nuxt/i, name: 'Nuxt.js', category: 'SSR Framework' },
+      { rx: /gatsby/i, name: 'Gatsby', category: 'Static Site' },
+      { rx: /tailwindcss/i, name: 'Tailwind CSS', category: 'CSS Framework' },
+      { rx: /svelte/i, name: 'Svelte', category: 'JS Framework' },
     ];
-
-    for (const p of htmlPatterns) {
-      if (p.rx.test(body)) {
-        if (!tech.find(t => t.name === p.name)) {
-          tech.push({ name: p.name, category: p.category, confidence: 'medium' });
-        }
-      }
-    }
-
-    // CDN detection
-    if (headers['cf-ray']) tech.push({ name: 'Cloudflare', category: 'CDN', confidence: 'high' });
+    for (const p of pats) if (p.rx.test(body) && !tech.find(t => t.name === p.name)) tech.push({ name: p.name, category: p.category, confidence: 'medium' });
+    if (headers['cf-ray']) tech.push({ name: 'Cloudflare', category: 'CDN/WAF', confidence: 'high' });
     if (headers['x-amz-cf-id']) tech.push({ name: 'AWS CloudFront', category: 'CDN', confidence: 'high' });
-    if (headers['x-served-by'] && /fastly/i.test(headers['x-served-by'])) tech.push({ name: 'Fastly', category: 'CDN', confidence: 'high' });
-
+    if (headers['x-vercel-id']) tech.push({ name: 'Vercel', category: 'Hosting', confidence: 'high' });
+    if (headers['x-amzn-requestid'] || headers['x-amzn-trace-id']) tech.push({ name: 'AWS', category: 'Cloud', confidence: 'high' });
     return { tech, statusCode: res.status, finalUrl: res.url };
-  } catch (e) {
-    return { error: e.message, tech: [] };
-  }
+  } catch (e) { return { error: e.message, tech: [] }; }
 }
 
-// ─── HTTP HEADERS AUDIT ─────────────────────────────────────────────────────
-const SECURITY_HEADERS = [
-  {
-    key: 'content-security-policy',
-    name: 'Content-Security-Policy',
-    weight: 30,
-    description: 'Prevents XSS and injection attacks by defining allowed content sources',
-  },
-  {
-    key: 'strict-transport-security',
-    name: 'Strict-Transport-Security',
-    weight: 25,
-    description: 'Forces HTTPS connections, preventing SSL stripping attacks',
-  },
-  {
-    key: 'x-frame-options',
-    name: 'X-Frame-Options',
-    weight: 15,
-    description: 'Prevents clickjacking by controlling iframe embedding',
-  },
-  {
-    key: 'x-content-type-options',
-    name: 'X-Content-Type-Options',
-    weight: 10,
-    description: 'Prevents MIME-type sniffing attacks',
-  },
-  {
-    key: 'referrer-policy',
-    name: 'Referrer-Policy',
-    weight: 10,
-    description: 'Controls referrer information sent with requests',
-  },
-  {
-    key: 'permissions-policy',
-    name: 'Permissions-Policy',
-    weight: 10,
-    description: 'Controls browser feature access (camera, mic, geolocation)',
-  },
+// ─── HEADERS AUDIT ──────────────────────────────────────────────────────────
+const SEC_HEADERS = [
+  { key: 'content-security-policy', name: 'Content-Security-Policy', weight: 30, description: 'Prevents XSS and injection attacks' },
+  { key: 'strict-transport-security', name: 'Strict-Transport-Security', weight: 25, description: 'Forces HTTPS, prevents SSL stripping' },
+  { key: 'x-frame-options', name: 'X-Frame-Options', weight: 15, description: 'Prevents clickjacking' },
+  { key: 'x-content-type-options', name: 'X-Content-Type-Options', weight: 10, description: 'Prevents MIME-type sniffing' },
+  { key: 'referrer-policy', name: 'Referrer-Policy', weight: 10, description: 'Controls referrer leakage' },
+  { key: 'permissions-policy', name: 'Permissions-Policy', weight: 10, description: 'Controls browser feature access' },
 ];
-
 async function headersAudit(targetUrl) {
   try {
-    const normalizedUrl = targetUrl.startsWith('http') ? targetUrl : `https://${targetUrl}`;
-    const res = await fetch(normalizedUrl, {
-      timeout: 10000,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; THREATOPS/1.0)' },
-      redirect: 'follow',
-    });
-
-    const headers = {};
-    res.headers.forEach((val, key) => { headers[key] = val; });
-
+    const url = targetUrl.startsWith('http') ? targetUrl : `https://${targetUrl}`;
+    const res = await fetch(url, { timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; THREATOPS/1.0)' }, redirect: 'follow' });
+    const headers = {}; res.headers.forEach((v, k) => { headers[k] = v; });
     let score = 0;
-    const audit = SECURITY_HEADERS.map(h => {
-      const val = headers[h.key];
-      const present = !!val;
+    const audit = SEC_HEADERS.map(h => {
+      const val = headers[h.key]; const present = !!val;
       if (present) score += h.weight;
-
       let grade = 'MISSING';
       if (present) {
-        // Extra checks
-        if (h.key === 'strict-transport-security') {
-          const maxAge = parseInt((val.match(/max-age=(\d+)/) || [])[1] || '0');
-          grade = maxAge >= 31536000 ? 'GOOD' : 'WEAK';
-          if (maxAge < 31536000) score -= h.weight * 0.5;
-        } else if (h.key === 'x-content-type-options') {
-          grade = val.toLowerCase() === 'nosniff' ? 'GOOD' : 'WEAK';
-        } else if (h.key === 'x-frame-options') {
-          grade = /deny|sameorigin/i.test(val) ? 'GOOD' : 'WEAK';
-        } else {
-          grade = 'PRESENT';
-        }
+        if (h.key === 'strict-transport-security') { const ma = parseInt((val.match(/max-age=(\d+)/) || [])[1] || '0'); grade = ma >= 31536000 ? 'GOOD' : 'WEAK'; if (ma < 31536000) score -= h.weight * .5; }
+        else if (h.key === 'x-content-type-options') grade = val.toLowerCase() === 'nosniff' ? 'GOOD' : 'WEAK';
+        else if (h.key === 'x-frame-options') grade = /deny|sameorigin/i.test(val) ? 'GOOD' : 'WEAK';
+        else grade = 'PRESENT';
       }
-
       return { ...h, value: val || null, present, grade };
     });
-
     score = Math.max(0, Math.min(100, Math.round(score)));
-    let letterGrade = 'F';
-    if (score >= 90) letterGrade = 'A';
-    else if (score >= 75) letterGrade = 'B';
-    else if (score >= 60) letterGrade = 'C';
-    else if (score >= 45) letterGrade = 'D';
-    else if (score >= 25) letterGrade = 'E';
-
-    return { audit, score, letterGrade, allHeaders: headers };
-  } catch (e) {
-    return { error: e.message, audit: [], score: 0, letterGrade: 'F' };
-  }
+    const g = score >= 90 ? 'A' : score >= 75 ? 'B' : score >= 60 ? 'C' : score >= 45 ? 'D' : score >= 25 ? 'E' : 'F';
+    return { audit, score, letterGrade: g };
+  } catch (e) { return { error: e.message, audit: [], score: 0, letterGrade: 'F' }; }
 }
 
-// ─── INTELLIGENCE FEED GENERATOR ────────────────────────────────────────────
+// ─── EMAIL SECURITY ──────────────────────────────────────────────────────────
+async function emailSecurityCheck(domain) {
+  const r = { spf: null, dmarc: null, dkim: [], mx: [] };
+  r.mx = await dns.resolveMx(domain).then(x => x.sort((a, b) => a.priority - b.priority).map(x => ({ host: x.exchange, priority: x.priority }))).catch(() => []);
+  try { const t = await dns.resolveTxt(domain); const s = t.flat().find(x => /^v=spf1/i.test(x)); r.spf = s ? { present: true, record: s, policy: /\-all$/i.test(s) ? 'hard-fail' : /\~all$/i.test(s) ? 'soft-fail' : 'neutral' } : { present: false }; } catch { r.spf = { present: false }; }
+  try { const t = await dns.resolveTxt(`_dmarc.${domain}`); const s = t.flat().find(x => /^v=DMARC1/i.test(x)); r.dmarc = s ? { present: true, record: s, policy: (s.match(/p=(\w+)/i) || [])[1] || 'none', pct: parseInt((s.match(/pct=(\d+)/i) || [])[1] || '100') } : { present: false }; } catch { r.dmarc = { present: false }; }
+  const sels = ['default', 'google', 'k1', 'mail', 'selector1', 'selector2', 'dkim', 'email', 's1', 's2'];
+  const dk = await Promise.allSettled(sels.map(async sel => { try { const t = await dns.resolveTxt(`${sel}._domainkey.${domain}`); return t.flat().find(x => /^v=DKIM1/i.test(x)) ? { selector: sel, present: true } : null; } catch { return null; } }));
+  r.dkim = dk.filter(x => x.status === 'fulfilled' && x.value).map(x => x.value);
+  return r;
+}
+
+// ─── REVERSE DNS ────────────────────────────────────────────────────────────
+async function reverseDNS(domain) {
+  try {
+    const v4 = await dns.resolve4(domain).catch(() => []);
+    const v6 = await dns.resolve6(domain).catch(() => []);
+    const all = [...v4.map(ip => ({ ip, version: 'IPv4' })), ...v6.map(ip => ({ ip, version: 'IPv6' }))];
+    if (!all.length) return { error: 'No IPs resolved', records: [] };
+    const records = await Promise.allSettled(all.slice(0, 10).map(async ({ ip, version }) => ({ ip, version, hostnames: await dns.reverse(ip).catch(() => []) })));
+    return { records: records.map(r => r.value || r.reason) };
+  } catch (e) { return { error: e.message, records: [] }; }
+}
+
+// ─── ABUSEIPDB ───────────────────────────────────────────────────────────────
+async function checkAbuseIPDB(ip) {
+  const key = process.env.ABUSEIPDB_API_KEY;
+  if (!key || key === 'your_abuseipdb_key_here') return { error: 'No ABUSEIPDB_API_KEY configured' };
+  try {
+    const res = await fetch(`https://api.abuseipdb.com/api/v2/check?ipAddress=${encodeURIComponent(ip)}&maxAgeInDays=90`, { headers: { 'Key': key, 'Accept': 'application/json' }, timeout: 10000 });
+    if (!res.ok) return { error: `AbuseIPDB error: ${res.status}` };
+    const j = await res.json(); return j.data || { error: 'No data' };
+  } catch (e) { return { error: e.message }; }
+}
+
+// ─── SHODAN ──────────────────────────────────────────────────────────────────
+async function shodanLookup(ip) {
+  const key = process.env.SHODAN_API_KEY;
+  if (!key || key === 'your_shodan_key_here') return { error: 'No SHODAN_API_KEY configured' };
+  try {
+    const res = await fetch(`https://api.shodan.io/shodan/host/${encodeURIComponent(ip)}?key=${key}`, { timeout: 15000 });
+    if (res.status === 404) return { error: 'No Shodan data for this IP' };
+    if (!res.ok) return { error: `Shodan error: ${res.status}` };
+    const d = await res.json();
+    return { ip: d.ip_str, org: d.org, isp: d.isp, asn: d.asn, country: d.country_name, city: d.city, ports: d.ports || [], vulns: Object.keys(d.vulns || {}), hostnames: d.hostnames || [], tags: d.tags || [], lastUpdate: d.last_update, services: (d.data || []).slice(0, 10).map(s => ({ port: s.port, transport: s.transport, product: s.product || null, version: s.version || null, banner: (s.data || '').replace(/[\r\n]+/g, ' ').substring(0, 120) })) };
+  } catch (e) { return { error: e.message }; }
+}
+
+// ─── HTTP PREVIEW ────────────────────────────────────────────────────────────
+async function httpPreview(targetUrl) {
+  try {
+    const url = targetUrl.startsWith('http') ? targetUrl : `https://${targetUrl}`;
+    const res = await fetch(url, { timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; THREATOPS/1.0)' }, redirect: 'follow' });
+    const headers = {}; res.headers.forEach((v, k) => { headers[k] = v; });
+    const body = await res.text();
+    const t = body.match(/<title[^>]*>([^<]+)<\/title>/i);
+    const m = body.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)/i) || body.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']description["']/i);
+    const g = body.match(/<meta[^>]+name=["']generator["'][^>]+content=["']([^"']+)/i);
+    return { statusCode: res.status, finalUrl: res.url, title: t ? t[1].trim().substring(0, 100) : null, description: m ? m[1].trim().substring(0, 200) : null, generator: g ? g[1].trim() : null, contentType: headers['content-type'] || null, bodySize: body.length, links: (body.match(/<a\s/gi) || []).length, scripts: (body.match(/<script/gi) || []).length, forms: (body.match(/<form/gi) || []).length, iframes: (body.match(/<iframe/gi) || []).length, preview: body.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().substring(0, 300) };
+  } catch (e) { return { error: e.message }; }
+}
+
+// ─── FINDINGS ────────────────────────────────────────────────────────────────
 function generateFindings(results) {
   const findings = [];
+  const push = (s, t, d, m) => findings.push({ severity: s, title: t, detail: d, module: m, ts: new Date().toISOString() });
 
-  const push = (severity, title, detail, module) =>
-    findings.push({ severity, title, detail, module, ts: new Date().toISOString() });
+  if (results.dns && !results.dns.error) { const hasSPF = (results.dns.TXT || []).some(r => r.data && /v=spf1/i.test(r.data)); const hasDMARC = (results.dns.TXT || []).some(r => r.data && /v=DMARC1/i.test(r.data)); if (!hasSPF) push('medium', 'No SPF record', 'Domain vulnerable to email spoofing', 'DNS'); if (!hasDMARC) push('medium', 'No DMARC record', 'No enforcement against spoofed email', 'DNS'); }
+  if (Array.isArray(results.ports)) { const open = results.ports.filter(p => p.status === 'open'); const risky = { 21: 'FTP', 23: 'Telnet', 1433: 'MSSQL', 3306: 'MySQL', 5432: 'PostgreSQL', 6379: 'Redis', 27017: 'MongoDB', 3389: 'RDP', 5900: 'VNC' }; for (const p of open) { if (risky[p.port]) push('high', `${risky[p.port]} (${p.port}) exposed`, `${risky[p.port]} publicly accessible`, 'Ports'); } if (open.some(p => p.port === 22)) push('info', 'SSH (22) open', 'Verify key-based auth and no root login', 'Ports'); if (open.some(p => [8080, 8443, 8888].includes(p.port))) push('low', 'Non-standard web port open', 'Dev/admin service may be exposed', 'Ports'); }
+  if (results.ssl && !results.ssl.error) { const { daysRemaining: d, selfSigned, protocol } = results.ssl; if (d < 0) push('high', 'SSL certificate EXPIRED', `Expired ${Math.abs(d)} days ago`, 'SSL'); else if (d < 14) push('high', `SSL expires in ${d} days`, 'Urgent: renewal required', 'SSL'); else if (d < 30) push('medium', `SSL expires in ${d} days`, 'Schedule renewal', 'SSL'); if (selfSigned) push('high', 'Self-signed certificate', 'Not issued by a trusted CA', 'SSL'); if (protocol && /TLSv1\.0|TLSv1\.1|SSLv/i.test(protocol)) push('high', `Weak protocol: ${protocol}`, 'Upgrade to TLS 1.2 or 1.3', 'SSL'); }
+  if (results.whois && !results.whois.error && results.whois.parsed?.expires) { const days = (new Date(results.whois.parsed.expires) - Date.now()) / 86400000; if (!isNaN(days) && days < 30) push('high', 'Domain expiring soon', `~${Math.round(days)} days remaining`, 'WHOIS'); else if (!isNaN(days) && days < 90) push('medium', 'Domain expires in <90 days', `Renew before ${results.whois.parsed.expires}`, 'WHOIS'); }
+  if (Array.isArray(results.subdomains)) { const live = results.subdomains.filter(s => s.live); const sens = live.filter(s => /dev|staging|test|beta|admin|internal|vpn|jenkins|jira|gitlab|ci|uat/i.test(s.subdomain)); for (const d of sens.slice(0, 5)) push('high', `Sensitive subdomain: ${d.subdomain}`, 'Dev/admin host publicly resolvable', 'Subdomains'); if (live.length > 20) push('medium', `${live.length} live subdomains`, 'Large attack surface', 'Subdomains'); }
+  if (results.breaches && !results.breaches.error && results.breaches.count > 0) push('high', `${results.breaches.count} data breach(es)`, `Found in: ${(results.breaches.breaches || []).slice(0, 3).map(b => b.Name).join(', ')}`, 'Breach');
+  if (results.tech?.tech) { const cms = results.tech.tech.find(t => t.category === 'CMS'); if (cms) push('medium', `CMS: ${cms.name}`, 'Keep updated to avoid known CVEs', 'Tech'); const old = results.tech.tech.filter(t => /apache\/[12]\.|nginx\/1\.[0-9]\.|php\/[4567]\./i.test(t.name)); for (const o of old) push('high', `Potentially outdated: ${o.name}`, 'Old version may have known vulnerabilities', 'Tech'); }
+  if (results.headers?.audit) { const miss = results.headers.audit.filter(h => !h.present); for (const m of miss) push(m.weight >= 25 ? 'high' : m.weight >= 15 ? 'medium' : 'low', `Missing: ${m.name}`, m.description, 'Headers'); if (results.headers.score < 30) push('high', `Security headers: ${results.headers.letterGrade} (${results.headers.score}/100)`, 'Very poor header posture', 'Headers'); }
+  if (results.emailSecurity) { if (!results.emailSecurity.spf?.present) push('medium', 'SPF not configured', 'Domain vulnerable to spoofing', 'Email'); if (!results.emailSecurity.dmarc?.present) push('medium', 'DMARC not configured', 'No email auth enforcement', 'Email'); else if (results.emailSecurity.dmarc.policy === 'none') push('low', 'DMARC policy: none', 'Monitoring only — not enforcing', 'Email'); }
+  if (results.waf) { if (results.waf.detected) push('info', `WAF: ${results.waf.wafs.map(w => w.name).join(', ')}`, 'Web application firewall detected', 'WAF'); else if (!results.waf.error) push('low', 'No WAF detected', 'Consider adding WAF protection', 'WAF'); }
+  if (results.geoip && !results.geoip.error && results.geoip.proxy) push('medium', 'Proxy/VPN at target IP', 'Target may be behind a proxy', 'GeoIP');
+  if (results.abuseipdb && !results.abuseipdb.error) { const s = results.abuseipdb.abuseConfidenceScore || 0; if (s > 75) push('high', `IP abuse score: ${s}%`, `${results.abuseipdb.totalReports || 0} reports — high risk`, 'AbuseIPDB'); else if (s > 25) push('medium', `IP abuse score: ${s}%`, 'Suspicious activity reported', 'AbuseIPDB'); }
+  if (results.shodan && !results.shodan.error) { for (const v of (results.shodan.vulns || []).slice(0, 10)) push('high', `CVE: ${v}`, 'Vulnerability detected via Shodan', 'Shodan'); }
+  if (results.httpPreview && !results.httpPreview.error && results.httpPreview.iframes > 0) push('low', `${results.httpPreview.iframes} iframe(s) detected`, 'Review for clickjacking vectors', 'Preview');
 
-  // DNS findings
-  const dns_res = results.dns;
-  if (dns_res && !dns_res.error) {
-    const aRecords = dns_res.A || [];
-    if (aRecords.length === 0) push('medium', 'No A records found', 'Domain may not resolve or is behind proxy', 'DNS');
-    if ((dns_res.TXT || []).some(r => r.data && /v=spf1/i.test(r.data) === false && /v=DMARC/i.test(r.data) === false)) {
-      // no-op, just checking
-    }
-    const hasSPF = (dns_res.TXT || []).some(r => r.data && /v=spf1/i.test(r.data));
-    const hasDMARC = (dns_res.TXT || []).some(r => r.data && /v=DMARC1/i.test(r.data));
-    if (!hasSPF) push('medium', 'No SPF record', 'Missing SPF TXT record — domain vulnerable to email spoofing', 'DNS');
-    if (!hasDMARC) push('medium', 'No DMARC record', 'Missing DMARC policy — no enforcement against spoofed email', 'DNS');
-  }
-
-  // Port findings
-  const ports = results.ports;
-  if (ports && Array.isArray(ports)) {
-    const openPorts = ports.filter(p => p.status === 'open');
-    const riskyOpen = openPorts.filter(p => [21, 23, 3306, 5432, 6379, 27017, 3389, 5900].includes(p.port));
-    for (const p of riskyOpen) {
-      const names = { 21: 'FTP', 23: 'Telnet', 3306: 'MySQL', 5432: 'PostgreSQL', 6379: 'Redis', 27017: 'MongoDB', 3389: 'RDP', 5900: 'VNC' };
-      push('high', `Sensitive port ${p.port} (${names[p.port]}) is open`, `Exposed ${names[p.port]} service — potential unauthorized access vector`, 'Ports');
-    }
-    if (openPorts.some(p => p.port === 22)) push('info', 'SSH (port 22) open', 'SSH service detected — ensure key-based auth and no root login', 'Ports');
-    if (openPorts.some(p => [8080, 8443].includes(p.port))) push('low', 'Non-standard HTTP port open', 'Development/admin web service may be exposed', 'Ports');
-  }
-
-  // WHOIS findings
-  const whoisRes = results.whois;
-  if (whoisRes && !whoisRes.error) {
-    if (whoisRes.parsed && whoisRes.parsed.privacy) push('info', 'WHOIS privacy enabled', 'Registrant details are masked — normal for privacy protection', 'WHOIS');
-    if (whoisRes.parsed && whoisRes.parsed.expires) {
-      const exp = new Date(whoisRes.parsed.expires);
-      const daysLeft = (exp - Date.now()) / 86400000;
-      if (!isNaN(daysLeft) && daysLeft < 30) push('high', 'Domain expiring soon', `Domain expires in ~${Math.round(daysLeft)} days — risk of domain hijack`, 'WHOIS');
-      else if (!isNaN(daysLeft) && daysLeft < 90) push('medium', 'Domain expires within 90 days', `Renew before ${whoisRes.parsed.expires}`, 'WHOIS');
-    }
-  }
-
-  // Subdomains findings
-  const subs = results.subdomains;
-  if (subs && Array.isArray(subs)) {
-    const live = subs.filter(s => s.live);
-    if (live.length > 20) push('medium', `${live.length} live subdomains discovered`, 'Large attack surface — review each subdomain for exposure', 'Subdomains');
-    const devLike = live.filter(s => /dev|staging|test|beta|admin|internal|vpn|api|jenkins|jira|gitlab|ci|uat/i.test(s.subdomain));
-    for (const d of devLike.slice(0, 5)) {
-      push('high', `Sensitive subdomain: ${d.subdomain}`, 'Dev/admin/internal subdomain publicly accessible', 'Subdomains');
-    }
-  }
-
-  // Breach findings
-  const breaches = results.breaches;
-  if (breaches && !breaches.error) {
-    if (breaches.count > 0) {
-      push('high', `${breaches.count} breach(es) found`, `Email found in: ${(breaches.breaches || []).slice(0, 3).map(b => b.Name).join(', ')}`, 'Breach');
-      const pastes = (breaches.breaches || []).filter(b => b.IsVerified === false);
-      if (pastes.length) push('medium', 'Unverified breach data present', 'Some breach records are unverified — may indicate paste site exposure', 'Breach');
-    } else {
-      push('info', 'No breaches found', 'Email not found in HIBP database', 'Breach');
-    }
-  }
-
-  // Tech stack findings
-  const tech = results.tech;
-  if (tech && tech.tech) {
-    const cms = tech.tech.find(t => t.category === 'CMS');
-    if (cms) push('medium', `CMS detected: ${cms.name}`, `${cms.name} installations should be kept updated to avoid known CVEs`, 'TechStack');
-    const outdated = tech.tech.filter(t => /apache\/[12]\.|nginx\/1\.[0-9]\.|php\/[4567]\./i.test(t.name));
-    for (const o of outdated) push('high', `Potentially outdated: ${o.name}`, 'Old server software version may have known vulnerabilities', 'TechStack');
-  }
-
-  // Headers findings
-  const hdr = results.headers;
-  if (hdr && hdr.audit) {
-    const missing = hdr.audit.filter(h => !h.present);
-    for (const m of missing) {
-      const sev = m.weight >= 25 ? 'high' : m.weight >= 15 ? 'medium' : 'low';
-      push(sev, `Missing: ${m.name}`, m.description, 'Headers');
-    }
-    if (hdr.score < 30) push('high', `Security headers score: ${hdr.letterGrade} (${hdr.score}/100)`, 'Very poor security header posture', 'Headers');
-    else if (hdr.score < 60) push('medium', `Security headers score: ${hdr.letterGrade} (${hdr.score}/100)`, 'Moderate security header coverage — review missing headers', 'Headers');
-  }
-
-  // Sort: high → medium → low → info
   const order = { high: 0, medium: 1, low: 2, info: 3 };
   findings.sort((a, b) => order[a.severity] - order[b.severity]);
   return findings;
 }
 
-// ─── SSE SCAN ENDPOINT ───────────────────────────────────────────────────────
-app.get('/api/scan', async (req, res) => {
+// ─── HISTORY ROUTES ───────────────────────────────────────────────────────────
+app.get('/api/history', requireAuth, async (req, res) => {
+  try { res.json(await dbGetHistory()); }
+  catch { res.json([]); }
+});
+
+app.get('/api/history/:id', requireAuth, async (req, res) => {
+  try { res.json(await dbGetHistoryItem(req.params.id.replace(/[^a-z0-9]/gi, ''))); }
+  catch { res.status(404).json({ error: 'Not found' }); }
+});
+
+app.delete('/api/history/:id', requireAuth, async (req, res) => {
+  try { await dbDeleteHistory(req.params.id.replace(/[^a-z0-9]/gi, '')); res.json({ ok: true }); }
+  catch { res.status(404).json({ error: 'Not found' }); }
+});
+
+// ─── SCAN ENDPOINT ───────────────────────────────────────────────────────────
+app.get('/api/scan', requireAuth, rateLimit, async (req, res) => {
   const { target, email } = req.query;
   if (!target) return res.status(400).json({ error: 'target required' });
 
-  // Extract domain from URL
-  let domain = target;
-  try {
-    if (target.startsWith('http')) {
-      domain = new URL(target).hostname;
-    } else if (target.includes('/')) {
-      domain = target.split('/')[0];
-    }
-  } catch {}
+  let domain = target.trim();
+  try { if (domain.startsWith('http')) domain = new URL(domain).hostname; else if (domain.includes('/')) domain = domain.split('/')[0]; domain = domain.split(':')[0]; } catch {}
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -438,124 +775,59 @@ app.get('/api/scan', async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.flushHeaders();
 
-  const send = (event, data) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  let closed = false; req.on('close', () => { closed = true; });
+  const send = (ev, data) => { if (closed) return; try { res.write(`event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`); } catch {} };
+  const hb = setInterval(() => { if (!closed) { try { res.write(': heartbeat\n\n'); } catch {} } }, 15000);
+
+  const scanId = Date.now().toString();
+  send('status', { msg: `Scan initiated: ${domain}`, ts: new Date().toISOString() });
+
+  let resolvedIP = null;
+  try { [resolvedIP] = await dns.resolve4(domain); } catch {}
+
+  const R = {};
+  const T = (id, label, fn) => async () => {
+    send('status', { msg: `${label}...`, module: id });
+    const r = await fn().catch(e => ({ error: e.message }));
+    R[id] = r; send(id, r);
+    send('status', { msg: `${label.split(':')[0]}: complete`, module: id, done: true, error: !!r.error });
   };
 
-  send('status', { msg: `Starting scan of ${domain}...`, ts: new Date().toISOString() });
+  await Promise.allSettled([
+    T('dns', 'DNS: querying records', () => dnsEnumerate(domain))(),
+    T('ports', 'Ports: scanning top 25', () => portScan(domain))(),
+    T('whois', 'WHOIS: looking up', () => doWhois(domain).then(r => ({ ...r, parsed: parseWhoisFields(r.raw || '') })))(),
+    T('subdomains', 'Subdomains: querying crt.sh', () => subdomainDiscovery(domain))(),
+    T('ssl', 'SSL: checking certificate', () => checkSSL(domain))(),
+    T('geoip', 'GeoIP: locating target', () => geoIPLookup(domain))(),
+    T('waf', 'WAF: detecting firewall', () => detectWAF(target))(),
+    T('tech', 'Tech: fingerprinting stack', () => techStackDetect(target))(),
+    T('headers', 'Headers: auditing security posture', () => headersAudit(target))(),
+    T('emailSecurity', 'Email: checking SPF/DKIM/DMARC', () => emailSecurityCheck(domain))(),
+    T('reverseDNS', 'Reverse DNS: resolving PTR records', () => reverseDNS(domain))(),
+    T('httpPreview', 'Preview: fetching response', () => httpPreview(target))(),
+    ...(email ? [T('breaches', 'Breach: checking HIBP', () => breachCheck(email))()] : [(async () => { send('breaches', { skipped: true }); })()]),
+    ...(resolvedIP
+      ? [T('abuseipdb', 'AbuseIPDB: checking IP reputation', () => checkAbuseIPDB(resolvedIP))(), T('shodan', 'Shodan: querying host data', () => shodanLookup(resolvedIP))()]
+      : [(async () => { send('abuseipdb', { error: 'Could not resolve IP' }); send('status', { module: 'abuseipdb', done: true, error: true, msg: 'AbuseIPDB: no IP' }); })(),
+        (async () => { send('shodan', { error: 'Could not resolve IP' }); send('status', { module: 'shodan', done: true, error: true, msg: 'Shodan: no IP' }); })()]),
+  ]);
 
-  const allResults = {};
-
-  // Run all scans in parallel, stream results as they complete
-  const scanTasks = [
-    (async () => {
-      send('status', { msg: 'DNS: querying records...', module: 'dns' });
-      try {
-        const r = await dnsEnumerate(domain);
-        allResults.dns = r;
-        send('dns', r);
-        send('status', { msg: 'DNS: complete', module: 'dns' });
-      } catch (e) {
-        allResults.dns = { error: e.message };
-        send('dns', { error: e.message });
-      }
-    })(),
-
-    (async () => {
-      send('status', { msg: 'Ports: scanning top 25...', module: 'ports' });
-      try {
-        const r = await portScan(domain);
-        allResults.ports = r;
-        send('ports', r);
-        send('status', { msg: 'Ports: complete', module: 'ports' });
-      } catch (e) {
-        allResults.ports = { error: e.message };
-        send('ports', { error: e.message });
-      }
-    })(),
-
-    (async () => {
-      send('status', { msg: 'WHOIS: looking up registration...', module: 'whois' });
-      try {
-        const r = await doWhois(domain);
-        const parsed = parseWhoisFields(r.raw || '');
-        allResults.whois = { ...r, parsed };
-        send('whois', allResults.whois);
-        send('status', { msg: 'WHOIS: complete', module: 'whois' });
-      } catch (e) {
-        allResults.whois = { error: e.message };
-        send('whois', { error: e.message });
-      }
-    })(),
-
-    (async () => {
-      send('status', { msg: 'Subdomains: querying crt.sh...', module: 'subdomains' });
-      try {
-        const r = await subdomainDiscovery(domain);
-        allResults.subdomains = r;
-        send('subdomains', r);
-        send('status', { msg: 'Subdomains: complete', module: 'subdomains' });
-      } catch (e) {
-        allResults.subdomains = { error: e.message };
-        send('subdomains', { error: e.message });
-      }
-    })(),
-
-    (async () => {
-      if (email) {
-        send('status', { msg: 'Breach: checking HIBP...', module: 'breaches' });
-        try {
-          const r = await breachCheck(email);
-          allResults.breaches = r;
-          send('breaches', r);
-          send('status', { msg: 'Breach: complete', module: 'breaches' });
-        } catch (e) {
-          allResults.breaches = { error: e.message };
-          send('breaches', { error: e.message });
-        }
-      } else {
-        send('breaches', { skipped: true, msg: 'No email provided' });
-      }
-    })(),
-
-    (async () => {
-      send('status', { msg: 'Tech: fingerprinting stack...', module: 'tech' });
-      try {
-        const r = await techStackDetect(target);
-        allResults.tech = r;
-        send('tech', r);
-        send('status', { msg: 'Tech: complete', module: 'tech' });
-      } catch (e) {
-        allResults.tech = { error: e.message };
-        send('tech', { error: e.message });
-      }
-    })(),
-
-    (async () => {
-      send('status', { msg: 'Headers: auditing security posture...', module: 'headers' });
-      try {
-        const r = await headersAudit(target);
-        allResults.headers = r;
-        send('headers', r);
-        send('status', { msg: 'Headers: complete', module: 'headers' });
-      } catch (e) {
-        allResults.headers = { error: e.message };
-        send('headers', { error: e.message });
-      }
-    })(),
-  ];
-
-  await Promise.allSettled(scanTasks);
-
-  // Generate intelligence findings
-  const findings = generateFindings(allResults);
+  clearInterval(hb);
+  const findings = generateFindings(R);
+  await dbSaveHistory(scanId, target, email || null, R, findings);
   send('findings', findings);
-  send('status', { msg: 'Scan complete.', done: true, ts: new Date().toISOString() });
+  send('done', { scanId, ts: new Date().toISOString(), counts: { high: findings.filter(f => f.severity === 'high').length, medium: findings.filter(f => f.severity === 'medium').length, low: findings.filter(f => f.severity === 'low').length, info: findings.filter(f => f.severity === 'info').length } });
   res.end();
 });
 
-// ─── START ───────────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`THREATOPS running at http://localhost:${PORT}`);
-});
+// ─── START (after DB init) ────────────────────────────────────────────────────
+initDB()
+  .then(() => {
+    const PORT = process.env.PORT || 3000;
+    app.listen(PORT, () => console.log(`THREATOPS running at http://localhost:${PORT} [${pool ? 'postgres' : 'file'} mode]`));
+  })
+  .catch(err => {
+    console.error('DB init failed:', err);
+    process.exit(1);
+  });

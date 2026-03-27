@@ -2,7 +2,7 @@
 <html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
   <title>THREATOPS</title>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
   <style>
@@ -198,6 +198,60 @@
     .svc-port { color: var(--cyan); font-weight: 600; margin-right: 6px; }
     .svc-product { color: var(--text); }
     .svc-banner { color: var(--text3); font-size: 9px; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    /* ── MOBILE ── */
+    @media (max-width: 768px) {
+      html, body { overflow: auto; height: auto; }
+      #app { height: auto; min-height: 100vh; overflow: visible; }
+
+      /* Topbar: compact, 2 rows */
+      #topbar { flex-wrap: wrap; height: auto; padding: 8px 12px; gap: 6px; }
+      #logo { font-size: 14px; letter-spacing: 2px; }
+      #input-group { order: 2; width: 100%; max-width: 100%; flex-wrap: nowrap; }
+      #email-input { display: none; }
+      #topbar-right { order: 1; gap: 4px; }
+      #clock { display: none; }
+      #username-tag { display: none; }
+
+      /* Status strip: horizontal scroll */
+      #statusstrip { overflow-x: auto; padding: 4px 10px; gap: 4px; }
+      .mod-ind { font-size: 8.5px; padding: 2px 5px; }
+      #findings-bar { display: none; }
+
+      /* Body: vertical stack */
+      #body { flex-direction: column; overflow: visible; }
+
+      /* Grid: single column */
+      #grid-area { border-right: none; border-bottom: 1px solid var(--border); overflow: visible; }
+      #grid { grid-template-columns: 1fr; gap: 6px; padding: 6px; overflow: visible; }
+      .module { min-height: 120px; }
+
+      /* Terminal */
+      #terminal { max-height: 120px; font-size: 10px; }
+
+      /* Right panel: full width below grid */
+      #right-panel { width: 100%; max-width: 100%; border-top: 1px solid var(--border); max-height: 300px; }
+
+      /* History drawer */
+      #history-drawer { width: 100% !important; }
+
+      /* Settings modal */
+      #settings-modal { width: 94vw !important; max-height: 80vh; overflow-y: auto; }
+
+      /* Announcement bar */
+      #announcement-bar { font-size: 10px; padding: 5px 10px; }
+
+      /* Touch-friendly buttons */
+      .icon-btn { width: 36px; height: 36px; font-size: 15px; }
+      #scan-btn { height: 36px; font-size: 12px; }
+      .inp { height: 36px; font-size: 12px; }
+    }
+
+    @media (max-width: 480px) {
+      #logo { font-size: 13px; letter-spacing: 1px; }
+      #grid { gap: 4px; padding: 4px; }
+      .module-title { font-size: 8.5px; }
+    }
   </style>
 </head>
 <body>

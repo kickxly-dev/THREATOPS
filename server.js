@@ -62,6 +62,9 @@ async function initDB() {
   await pool.query(`ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS notes TEXT`);
   await pool.query(`ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS tags TEXT`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS banned BOOLEAN DEFAULT FALSE`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_ip TEXT`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS login_count INT DEFAULT 0`);
   await pool.query(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
   await pool.query(`CREATE TABLE IF NOT EXISTS api_tokens (
     id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL,
@@ -82,7 +85,7 @@ async function dbFindUser(username) {
     return u || null;
   }
   const { rows } = await pool.query(
-    `SELECT id, username, password_hash AS "passwordHash", onboarded, is_admin AS "isAdmin", created_at AS "createdAt", banned
+    `SELECT id, username, password_hash AS "passwordHash", onboarded, is_admin AS "isAdmin", created_at AS "createdAt", banned, last_login_ip AS "lastLoginIp", last_login_at AS "lastLoginAt", login_count AS "loginCount"
      FROM users WHERE LOWER(username) = LOWER($1)`, [username]);
   return rows[0] || null;
 }
@@ -93,7 +96,7 @@ async function dbFindUserById(id) {
     return u || null;
   }
   const { rows } = await pool.query(
-    `SELECT id, username, password_hash AS "passwordHash", onboarded, is_admin AS "isAdmin", created_at AS "createdAt", banned
+    `SELECT id, username, password_hash AS "passwordHash", onboarded, is_admin AS "isAdmin", created_at AS "createdAt", banned, last_login_ip AS "lastLoginIp", last_login_at AS "lastLoginAt", login_count AS "loginCount"
      FROM users WHERE id = $1`, [id]);
   return rows[0] || null;
 }
@@ -467,6 +470,33 @@ async function dbGetAuditLog(limit = 50) {
   return rows;
 }
 
+async function dbUpdateLastLogin(userId, ip) {
+  if (!pool) {
+    const users = fileLoadUsers();
+    const u = users.find(u => u.id === userId); if (!u) return;
+    u.lastLoginIp = ip; u.lastLoginAt = new Date().toISOString(); u.loginCount = (u.loginCount||0)+1;
+    await fileSaveUsers(users); return;
+  }
+  await pool.query(
+    `UPDATE users SET last_login_ip=$1, last_login_at=NOW(), login_count=COALESCE(login_count,0)+1 WHERE id=$2`,
+    [ip, userId]).catch(() => {});
+}
+
+async function dbGetAllUsersInfo() {
+  if (!pool) return [];
+  const { rows } = await pool.query(`
+    SELECT u.id, u.username, u.created_at AS "createdAt", u.is_admin AS "isAdmin", u.onboarded,
+           u.banned, u.last_login_ip AS "lastLoginIp", u.last_login_at AS "lastLoginAt", u.login_count AS "loginCount",
+           COUNT(DISTINCT s.id)::int AS "scanCount",
+           COUNT(DISTINCT t.id)::int AS "tokenCount"
+    FROM users u
+    LEFT JOIN scan_history s ON s.user_id = u.id
+    LEFT JOIN api_tokens t ON t.user_id = u.id
+    GROUP BY u.id ORDER BY u.created_at
+  `);
+  return rows;
+}
+
 async function dbGetTopTargets() {
   if (!pool) {
     const result = {};
@@ -511,10 +541,14 @@ function parseCookies(header) {
   return c;
 }
 
-function createSession(userId, username, isAdmin = false) {
+function createSession(userId, username, isAdmin = false, ip = null) {
   const token = crypto.randomBytes(32).toString('hex');
-  sessions.set(token, { userId, username, isAdmin, expiry: Date.now() + 24 * 60 * 60 * 1000 });
+  sessions.set(token, { userId, username, isAdmin, ip, expiry: Date.now() + 24 * 60 * 60 * 1000 });
   return token;
+}
+
+function getClientIP(req) {
+  return (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress || 'unknown';
 }
 
 function getSession(req) {
@@ -695,7 +729,9 @@ app.post('/api/login', async (req, res) => {
     return res.send(loginPage({ loginErr: 'Invalid username or password.' }));
   }
   if (user.banned) return res.send(loginPage({ loginErr: 'Account suspended. Contact an administrator.' }));
-  const token = createSession(user.id, user.username, user.isAdmin || false);
+  const ip = getClientIP(req);
+  dbUpdateLastLogin(user.id, ip);
+  const token = createSession(user.id, user.username, user.isAdmin || false, ip);
   res.setHeader('Set-Cookie', `to_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`);
   res.redirect('/');
 });
@@ -904,9 +940,13 @@ app.get('/api/admin/sessions', requireAdmin, (req, res) => {
   const list = [];
   for (const [token, s] of sessions) {
     if (now > s.expiry) continue;
-    list.push({ tokenPrefix: token.slice(0, 8) + '...', userId: s.userId, username: s.username, isAdmin: s.isAdmin, expiresIn: Math.round((s.expiry - now) / 60000) });
+    list.push({ tokenPrefix: token.slice(0, 8) + '...', userId: s.userId, username: s.username, isAdmin: s.isAdmin, ip: s.ip || 'unknown', expiresIn: Math.round((s.expiry - now) / 60000) });
   }
   res.json(list);
+});
+
+app.get('/api/admin/info', requireAdmin, async (req, res) => {
+  try { res.json(await dbGetAllUsersInfo()); } catch { res.json([]); }
 });
 
 app.delete('/api/admin/sessions/:prefix', requireAdmin, (req, res) => {
@@ -1156,6 +1196,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
   <div class="tab" onclick="switchTab('users')">Users</div>
   <div class="tab" onclick="switchTab('scans')">Scans</div>
   <div class="tab" onclick="switchTab('sessions')">Sessions</div>
+  <div class="tab" onclick="switchTab('info')">User Info</div>
   <div class="tab" onclick="switchTab('settings')">Settings</div>
 </div>
 
@@ -1253,6 +1294,15 @@ tr:hover td{background:rgba(255,255,255,.02);}
   </div>
 </div>
 
+<!-- USER INFO TAB -->
+<div class="tab-pane" id="tab-info">
+  <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;">
+    <input type="text" class="inp" id="info-search" placeholder="Search username or IP..." style="max-width:300px;" oninput="filterInfo()">
+    <button class="btn" onclick="loadInfo()">Refresh</button>
+  </div>
+  <div id="info-cards"></div>
+</div>
+
 <!-- SETTINGS TAB -->
 <div class="tab-pane" id="tab-settings">
   <div class="section">
@@ -1281,13 +1331,14 @@ function toast(msg, err) {
   t.style.display = 'block'; setTimeout(() => t.style.display='none', 3500);
 }
 
-const TABS = ['overview','users','scans','sessions','settings'];
+const TABS = ['overview','users','scans','sessions','info','settings'];
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', TABS[i]===name));
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id==='tab-'+name));
   if (name==='users' && !window._usersLoaded) loadUsers();
   if (name==='scans' && !window._scansLoaded) loadScans();
   if (name==='sessions') loadSessions();
+  if (name==='info' && !window._infoLoaded) loadInfo();
   if (name==='settings') loadKeys();
 }
 
@@ -1487,6 +1538,58 @@ async function saveKeys() {
   const r = await fetch('/api/admin/api-keys', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   if (r.ok) { toast('Keys saved'); document.getElementById('keys-msg').textContent = ''; loadKeys(); pairs.forEach(([eid])=>{ const el=document.getElementById(eid); if(el) el.value=''; }); }
   else toast('Error saving keys', true);
+}
+
+// ── USER INFO ─────────────────────────────────────────────────────────────────
+let _infoData = [];
+async function loadInfo() {
+  window._infoLoaded = true;
+  document.getElementById('info-cards').innerHTML = '<div style="color:#444458;padding:20px;">Loading...</div>';
+  _infoData = await fetch('/api/admin/info').then(r=>r.json()).catch(()=>[]);
+  renderInfo(_infoData);
+}
+function filterInfo() {
+  const q = document.getElementById('info-search').value.toLowerCase();
+  renderInfo(q ? _infoData.filter(u => u.username.toLowerCase().includes(q) || (u.lastLoginIp||'').includes(q)) : _infoData);
+}
+function renderInfo(users) {
+  const c = document.getElementById('info-cards');
+  if (!users.length) { c.innerHTML = '<div style="color:#444458;padding:20px;">No users found.</div>'; return; }
+  c.innerHTML = users.map(u => {
+    const badges = [
+      u.isAdmin ? '<span class="tag t-r">ADMIN</span>' : '<span class="tag t-c">USER</span>',
+      u.banned ? '<span class="tag t-r">BANNED</span>' : '<span class="tag t-g">ACTIVE</span>',
+      !u.onboarded ? '<span class="tag t-y">NOT ONBOARDED</span>' : '',
+    ].join('');
+    return \`<div class="section" style="margin-bottom:10px;">
+      <div class="sec-hdr" style="cursor:pointer;" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">
+        <span style="color:#e0e0e8;font-size:12px;font-weight:700;">\${esc(u.username)}</span>
+        <div style="margin-left:8px;display:flex;gap:4px;">\${badges}</div>
+        <span style="margin-left:auto;font-size:9.5px;color:#8888a0;">\${u.scanCount||0} scans · click to expand</span>
+      </div>
+      <div style="display:none;display:block;">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0;border-top:1px solid #1a1a24;">
+          \${irow('User ID', u.id)}
+          \${irow('Username', u.username)}
+          \${irow('Registered', u.createdAt ? new Date(u.createdAt).toLocaleString() : '—')}
+          \${irow('Last Login', u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString() : 'Never')}
+          \${irow('Last Login IP', u.lastLoginIp || 'Unknown')}
+          \${irow('Login Count', u.loginCount || 0)}
+          \${irow('Total Scans', u.scanCount || 0)}
+          \${irow('API Tokens', u.tokenCount || 0)}
+          \${irow('Role', u.isAdmin ? 'Administrator' : 'User')}
+          \${irow('Account Status', u.banned ? 'Banned' : 'Active')}
+          \${irow('Onboarded', u.onboarded ? 'Yes' : 'No')}
+        </div>
+      </div>
+    </div>\`;
+  }).join('');
+}
+function irow(label, value) {
+  return \`<div style="padding:8px 14px;border-bottom:1px solid #0f0f14;">
+    <div style="font-size:9px;color:#444458;letter-spacing:1px;text-transform:uppercase;margin-bottom:2px;">\${esc(String(label))}</div>
+    <div style="font-size:11px;color:#e0e0e8;word-break:break-all;">\${esc(String(value))}</div>
+  </div>\`;
 }
 
 loadOverview();

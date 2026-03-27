@@ -356,7 +356,13 @@ app.get('/login', (req, res) => {
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.send(loginPage({ loginErr: 'Username and password required.' }));
-  const user = await dbFindUser(username).catch(() => null);
+  let user;
+  try {
+    user = await dbFindUser(username);
+  } catch (err) {
+    console.error('Login error:', err);
+    return res.send(loginPage({ loginErr: 'Server error. Please try again.' }));
+  }
   if (!user || !(await verifyPassword(password, user.passwordHash))) {
     return res.send(loginPage({ loginErr: 'Invalid username or password.' }));
   }
@@ -382,7 +388,13 @@ app.post('/api/register', async (req, res) => {
     createdAt: new Date().toISOString(),
     onboarded: false,
   };
-  const created = await dbCreateUser(newUser).catch(() => false);
+  let created;
+  try {
+    created = await dbCreateUser(newUser);
+  } catch (err) {
+    console.error('Register error:', err);
+    return res.send(loginPage({ tab: 'register', registerErr: 'Server error during registration. Please try again.' }));
+  }
   if (!created) return res.send(loginPage({ tab: 'register', registerErr: 'Username already taken.' }));
   const token = createSession(newUser.id, newUser.username);
   res.setHeader('Set-Cookie', `to_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`);

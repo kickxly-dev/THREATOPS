@@ -21,7 +21,7 @@
       color: #e0e0e0;
     }
 
-    /* Scanline effect overlay */
+    /* Minimal scanlines - very subtle */
     body::before {
       content: '';
       position: fixed;
@@ -31,25 +31,13 @@
       height: 100%;
       background: repeating-linear-gradient(
         0deg,
-        rgba(0, 0, 0, 0.03),
-        rgba(0, 0, 0, 0.03) 1px,
+        rgba(0, 0, 0, 0.008),
+        rgba(0, 0, 0, 0.008) 1px,
         transparent 1px,
         transparent 2px
       );
       pointer-events: none;
       z-index: 999;
-    }
-
-    body::after {
-      content: '';
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400"><filter id="noise"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="4" result="noise" seed="2"/></filter><rect width="400" height="400" fill="rgba(0,0,0,0.02)" filter="url(%23noise)"/></svg>');
-      pointer-events: none;
-      z-index: 998;
     }
 
     #container {
@@ -213,9 +201,9 @@
     #grid {
       flex: 1;
       display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-      padding: 10px;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+      padding: 8px;
       overflow-y: auto;
       background: #060608;
     }
@@ -506,6 +494,18 @@
             <div class="module-title">Tech Stack</div>
             <div class="module-content"></div>
           </div>
+          <div id="module-whois" class="module">
+            <div class="module-title">WHOIS</div>
+            <div class="module-content"></div>
+          </div>
+          <div id="module-breaches" class="module">
+            <div class="module-title">Breach Check</div>
+            <div class="module-content"></div>
+          </div>
+          <div id="module-headers" class="module">
+            <div class="module-title">Security Headers</div>
+            <div class="module-content"></div>
+          </div>
         </div>
 
         <!-- Terminal log -->
@@ -597,8 +597,10 @@
       document.getElementById('terminal').innerHTML = '';
 
       for (const mod of Object.values(modules)) {
-        const content = mod.querySelector('.module-content');
-        if (content) content.innerHTML = '<div class="spinner"></div> Loading...';
+        if (mod) {
+          const content = mod.querySelector('.module-content');
+          if (content) content.innerHTML = '<div class="spinner"></div> Loading...';
+        }
       }
 
       logTerminal(`Scanning: ${target}${email ? ' | Email: ' + email : ''}`);
@@ -663,9 +665,9 @@
 
       eventSource.addEventListener('whois', (e) => {
         const data = JSON.parse(e.data);
-        const content = modules.whois?.querySelector('.module-content') || document.createElement('div');
+        clearModule('whois');
         if (data.error) {
-          content.innerHTML = `<div class="error">Error: ${data.error}</div>`;
+          modules.whois.querySelector('.module-content').innerHTML = `<div class="error">Error: ${data.error}</div>`;
           return;
         }
         const p = data.parsed || {};
@@ -676,7 +678,7 @@
         if (p.updated) html += `<div class="record"><span class="record-label">Updated:</span> ${p.updated}</div>`;
         if (p.nameservers) html += `<div class="record"><span class="record-label">NS:</span> ${p.nameservers.join(', ')}</div>`;
         if (p.privacy) html += `<div class="record"><span class="record-label">Privacy:</span> Enabled</div>`;
-        content.innerHTML = html || 'No WHOIS data available';
+        modules.whois.querySelector('.module-content').innerHTML = html || 'No WHOIS data available';
       });
 
       eventSource.addEventListener('subdomains', (e) => {
@@ -701,24 +703,24 @@
 
       eventSource.addEventListener('breaches', (e) => {
         const data = JSON.parse(e.data);
-        const content = modules.breaches?.querySelector('.module-content') || document.createElement('div');
+        clearModule('breaches');
         if (data.skipped) {
-          content.innerHTML = '<div style="color: #888;">No email provided</div>';
+          modules.breaches.querySelector('.module-content').innerHTML = '<div style="color: #888;">No email provided</div>';
           return;
         }
         if (data.error) {
-          content.innerHTML = `<div class="error">Error: ${data.error}</div>`;
+          modules.breaches.querySelector('.module-content').innerHTML = `<div class="error">Error: ${data.error}</div>`;
           return;
         }
         if (data.count === 0) {
-          content.innerHTML = '<div class="success">✓ No breaches found</div>';
+          modules.breaches.querySelector('.module-content').innerHTML = '<div class="success">✓ No breaches found</div>';
           return;
         }
         let html = `<div class="error"><strong>Found in ${data.count} breaches:</strong></div>`;
         for (const b of data.breaches.slice(0, 10)) {
           html += `<div class="record">${b.Name} (${b.BreachDate})</div>`;
         }
-        content.innerHTML = html;
+        modules.breaches.querySelector('.module-content').innerHTML = html;
       });
 
       eventSource.addEventListener('tech', (e) => {
@@ -741,9 +743,9 @@
 
       eventSource.addEventListener('headers', (e) => {
         const data = JSON.parse(e.data);
-        const content = modules.headers?.querySelector('.module-content') || document.createElement('div');
+        clearModule('headers');
         if (data.error) {
-          content.innerHTML = `<div class="error">Error: ${data.error}</div>`;
+          modules.headers.querySelector('.module-content').innerHTML = `<div class="error">Error: ${data.error}</div>`;
           return;
         }
         let html = `<div><strong>Grade: ${data.letterGrade} (${data.score}/100)</strong></div>`;
@@ -754,7 +756,7 @@
             html += `<div class="record">${h.name}</div>`;
           }
         }
-        content.innerHTML = html;
+        modules.headers.querySelector('.module-content').innerHTML = html;
       });
 
       eventSource.addEventListener('findings', (e) => {

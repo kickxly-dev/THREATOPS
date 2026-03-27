@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>THREATOPS</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Share+Tech+Mono&family=Bebas+Neue&display=swap" rel="stylesheet">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      font-family: 'JetBrains Mono', monospace;
+      background: #060608;
+      color: #e0e0e0;
+    }
+
+    /* Scanline effect overlay */
+    body::before {
+      content: '';
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: repeating-linear-gradient(
+        0deg,
+        rgba(0, 0, 0, 0.03),
+        rgba(0, 0, 0, 0.03) 1px,
+        transparent 1px,
+        transparent 2px
+      );
+      pointer-events: none;
+      z-index: 999;
+    }
+
+    body::after {
+      content: '';
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400"><filter id="noise"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="4" result="noise" seed="2"/></filter><rect width="400" height="400" fill="rgba(0,0,0,0.02)" filter="url(%23noise)"/></svg>');
+      pointer-events: none;
+      z-index: 998;
+    }
+
+    #container {
+      display: flex;
+      width: 100%;
+      height: 100%;
+      flex-direction: column;
+    }
+
+    /* Top bar */
+    #topbar {
+      background: #0a0a0d;
+      border-bottom: 2px solid #ff2a2a;
+      padding: 12px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-shrink: 0;
+    }
+
+    #logo {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 24px;
+      font-weight: bold;
+      color: #ff2a2a;
+      letter-spacing: 2px;
+    }
+
+    #clock {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 13px;
+      color: #ff2a2a;
+      font-weight: 600;
+    }
+
+    /* Main content area */
+    #content {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* Left nav */
+    #nav {
+      width: 200px;
+      background: #0f0f12;
+      border-right: 1px solid #1a1a1f;
+      padding: 15px;
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+
+    .nav-section {
+      margin-bottom: 20px;
+    }
+
+    .nav-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      color: #ff2a2a;
+      font-weight: 600;
+      letter-spacing: 1px;
+      margin-bottom: 8px;
+      border-bottom: 1px solid #1a1a1f;
+      padding-bottom: 4px;
+    }
+
+    .nav-item {
+      font-size: 12px;
+      padding: 6px 8px;
+      margin: 4px 0;
+      cursor: pointer;
+      color: #888;
+      transition: all 0.2s;
+      border-left: 2px solid transparent;
+      padding-left: 10px;
+    }
+
+    .nav-item:hover {
+      color: #ff2a2a;
+      background: #1a1a1f;
+    }
+
+    .nav-item.active {
+      color: #ff2a2a;
+      border-left-color: #ff2a2a;
+      background: #1a1a1f;
+    }
+
+    /* Center column */
+    #center {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: #060608;
+      border-right: 1px solid #1a1a1f;
+      overflow: hidden;
+    }
+
+    /* Input area */
+    #inputArea {
+      padding: 15px;
+      border-bottom: 1px solid #1a1a1f;
+      flex-shrink: 0;
+    }
+
+    #inputRow {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    #targetInput, #emailInput {
+      flex: 1;
+      padding: 10px;
+      background: #0f0f12;
+      border: 1px solid #1a1a1f;
+      color: #e0e0e0;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      transition: border 0.2s;
+    }
+
+    #targetInput:focus, #emailInput:focus {
+      outline: none;
+      border-color: #ff2a2a;
+      box-shadow: 0 0 8px rgba(255, 42, 42, 0.3);
+    }
+
+    button {
+      padding: 10px 20px;
+      background: #ff2a2a;
+      border: none;
+      color: #060608;
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 600;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    button:hover:not(:disabled) {
+      background: #ff4444;
+      box-shadow: 0 0 12px rgba(255, 42, 42, 0.5);
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    #scanStatus {
+      font-size: 11px;
+      color: #888;
+      margin-top: 5px;
+    }
+
+    /* Module grid */
+    #grid {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 10px;
+      overflow-y: auto;
+      background: #060608;
+    }
+
+    .module {
+      background: #0f0f12;
+      border: 1px solid #1a1a1f;
+      border-top: 2px solid #ff2a2a;
+      padding: 12px;
+      overflow-y: auto;
+      max-height: 100%;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .module-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      color: #ff2a2a;
+      font-weight: 600;
+      margin-bottom: 10px;
+      letter-spacing: 1px;
+      border-bottom: 1px solid #1a1a1f;
+      padding-bottom: 6px;
+    }
+
+    .module-content {
+      font-size: 11px;
+      line-height: 1.6;
+      overflow-y: auto;
+      flex: 1;
+    }
+
+    .record {
+      margin-bottom: 8px;
+      padding: 6px;
+      background: #0a0a0d;
+      border-left: 2px solid #ff2a2a;
+      padding-left: 8px;
+    }
+
+    .record-label {
+      color: #ff2a2a;
+      font-weight: 600;
+    }
+
+    .record-value {
+      color: #aaa;
+      word-break: break-all;
+    }
+
+    /* Port chips */
+    .port-chip {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 2px;
+      margin: 2px 2px 2px 0;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .port-open {
+      background: #1a4d1a;
+      color: #4ade80;
+      border: 1px solid #4ade80;
+    }
+
+    .port-closed {
+      background: #4d1a1a;
+      color: #ff6b6b;
+      border: 1px solid #ff6b6b;
+    }
+
+    .port-filtered {
+      background: #4d3a1a;
+      color: #fbbf24;
+      border: 1px solid #fbbf24;
+    }
+
+    /* Right panel */
+    #right {
+      width: 380px;
+      background: #0f0f12;
+      border-left: 1px solid #1a1a1f;
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+
+    #rightTitle {
+      font-size: 11px;
+      text-transform: uppercase;
+      color: #ff2a2a;
+      font-weight: 600;
+      padding: 12px;
+      border-bottom: 1px solid #1a1a1f;
+      letter-spacing: 1px;
+    }
+
+    #feedContainer {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+    }
+
+    .finding {
+      background: #0a0a0d;
+      border-left: 3px solid #666;
+      padding: 10px;
+      margin-bottom: 8px;
+      border-radius: 2px;
+      font-size: 11px;
+      line-height: 1.5;
+    }
+
+    .finding.high {
+      border-left-color: #ff2a2a;
+      background: rgba(255, 42, 42, 0.05);
+    }
+
+    .finding.medium {
+      border-left-color: #fbbf24;
+      background: rgba(251, 191, 36, 0.05);
+    }
+
+    .finding.low {
+      border-left-color: #60a5fa;
+      background: rgba(96, 165, 250, 0.05);
+    }
+
+    .finding.info {
+      border-left-color: #888;
+      background: rgba(136, 136, 136, 0.05);
+    }
+
+    .finding-severity {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 2px;
+      font-weight: 600;
+      font-size: 10px;
+      text-transform: uppercase;
+      margin-right: 6px;
+    }
+
+    .finding.high .finding-severity {
+      background: #ff2a2a;
+      color: #fff;
+    }
+
+    .finding.medium .finding-severity {
+      background: #fbbf24;
+      color: #000;
+    }
+
+    .finding.low .finding-severity {
+      background: #60a5fa;
+      color: #fff;
+    }
+
+    .finding.info .finding-severity {
+      background: #666;
+      color: #fff;
+    }
+
+    .finding-title {
+      font-weight: 600;
+      color: #e0e0e0;
+      margin: 4px 0;
+    }
+
+    .finding-detail {
+      color: #aaa;
+      font-size: 10px;
+      margin-top: 3px;
+    }
+
+    /* Terminal log */
+    #terminal {
+      height: 120px;
+      background: #0a0a0d;
+      border-top: 1px solid #1a1a1f;
+      padding: 10px;
+      overflow-y: auto;
+      font-size: 10px;
+      font-family: 'Share Tech Mono', monospace;
+      color: #4ade80;
+      flex-shrink: 0;
+    }
+
+    .terminal-line {
+      margin: 2px 0;
+    }
+
+    /* Loading spinner */
+    .spinner {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border: 2px solid #ff2a2a;
+      border-radius: 50%;
+      border-top-color: transparent;
+      animation: spin 0.6s linear infinite;
+      margin-right: 6px;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Scrollbar styling */
+    ::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: #0a0a0d;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #1a1a1f;
+      border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #ff2a2a;
+    }
+
+    .error {
+      color: #ff6b6b;
+    }
+
+    .success {
+      color: #4ade80;
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div id="topbar">
+      <div id="logo">⚔ THREATOPS</div>
+      <div id="clock"></div>
+    </div>
+
+    <div id="content">
+      <!-- Left nav -->
+      <div id="nav">
+        <div class="nav-section">
+          <div class="nav-title">MODULES</div>
+          <div class="nav-item active" data-module="dns">DNS Enumeration</div>
+          <div class="nav-item" data-module="ports">Port Scanner</div>
+          <div class="nav-item" data-module="whois">WHOIS</div>
+          <div class="nav-item" data-module="subdomains">Subdomains</div>
+          <div class="nav-item" data-module="breaches">Breach Check</div>
+          <div class="nav-item" data-module="tech">Tech Stack</div>
+          <div class="nav-item" data-module="headers">Headers Audit</div>
+        </div>
+      </div>
+
+      <!-- Center column -->
+      <div id="center">
+        <!-- Input area -->
+        <div id="inputArea">
+          <div id="inputRow">
+            <input type="text" id="targetInput" placeholder="domain.com or https://domain.com/path" autofocus>
+            <input type="email" id="emailInput" placeholder="email for breach check (optional)">
+            <button id="scanBtn">SCAN</button>
+          </div>
+          <div id="scanStatus"></div>
+        </div>
+
+        <!-- Module grid -->
+        <div id="grid">
+          <div id="module-dns" class="module">
+            <div class="module-title">DNS Records</div>
+            <div class="module-content"></div>
+          </div>
+          <div id="module-ports" class="module">
+            <div class="module-title">Open Ports</div>
+            <div class="module-content"></div>
+          </div>
+          <div id="module-subdomains" class="module">
+            <div class="module-title">Subdomains (Cert Transparency)</div>
+            <div class="module-content"></div>
+          </div>
+          <div id="module-tech" class="module">
+            <div class="module-title">Tech Stack</div>
+            <div class="module-content"></div>
+          </div>
+        </div>
+
+        <!-- Terminal log -->
+        <div id="terminal"></div>
+      </div>
+
+      <!-- Right panel -->
+      <div id="right">
+        <div id="rightTitle">INTELLIGENCE FEED</div>
+        <div id="feedContainer"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentTarget = '';
+    let scanning = false;
+
+    const modules = {
+      dns: document.getElementById('module-dns'),
+      ports: document.getElementById('module-ports'),
+      whois: document.getElementById('module-whois'),
+      subdomains: document.getElementById('module-subdomains'),
+      breaches: document.getElementById('module-breaches'),
+      tech: document.getElementById('module-tech'),
+      headers: document.getElementById('module-headers'),
+    };
+
+    // ─── UTILITIES ───────────────────────────────────────────────────────────
+    function updateClock() {
+      const now = new Date();
+      const utc = now.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+      document.getElementById('clock').textContent = utc;
+    }
+
+    function logTerminal(msg, isError = false) {
+      const term = document.getElementById('terminal');
+      const line = document.createElement('div');
+      line.className = `terminal-line ${isError ? 'error' : ''}`;
+      line.textContent = `> ${msg}`;
+      term.appendChild(line);
+      term.scrollTop = term.scrollHeight;
+    }
+
+    function clearModule(moduleId) {
+      const content = modules[moduleId]?.querySelector('.module-content');
+      if (content) content.innerHTML = '';
+    }
+
+    function addFinding(severity, title, detail, module) {
+      const feed = document.getElementById('feedContainer');
+      const finding = document.createElement('div');
+      finding.className = `finding ${severity}`;
+      finding.innerHTML = `
+        <div>
+          <span class="finding-severity">${severity}</span>
+          <span style="color: #ff2a2a; font-weight: 600;">${module}</span>
+        </div>
+        <div class="finding-title">${title}</div>
+        <div class="finding-detail">${detail}</div>
+      `;
+      feed.appendChild(finding);
+      feed.scrollTop = feed.scrollHeight;
+    }
+
+    // ─── EVENT LISTENERS ────────────────────────────────────────────────────
+    document.getElementById('scanBtn').addEventListener('click', () => {
+      const target = document.getElementById('targetInput').value.trim();
+      const email = document.getElementById('emailInput').value.trim();
+      if (!target) {
+        logTerminal('Error: Enter a domain or URL', true);
+        return;
+      }
+      startScan(target, email);
+    });
+
+    document.getElementById('targetInput').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') document.getElementById('scanBtn').click();
+    });
+
+    // ─── SCAN LOGIC ──────────────────────────────────────────────────────────
+    function startScan(target, email) {
+      if (scanning) return;
+      scanning = true;
+      currentTarget = target;
+
+      document.getElementById('scanBtn').disabled = true;
+      document.getElementById('feedContainer').innerHTML = '';
+      document.getElementById('terminal').innerHTML = '';
+
+      for (const mod of Object.values(modules)) {
+        const content = mod.querySelector('.module-content');
+        if (content) content.innerHTML = '<div class="spinner"></div> Loading...';
+      }
+
+      logTerminal(`Scanning: ${target}${email ? ' | Email: ' + email : ''}`);
+
+      const params = new URLSearchParams({ target, ...(email && { email }) });
+      const eventSource = new EventSource(`/api/scan?${params}`);
+
+      eventSource.addEventListener('status', (e) => {
+        const data = JSON.parse(e.data);
+        if (data.module) {
+          logTerminal(data.msg);
+        } else {
+          document.getElementById('scanStatus').textContent = data.msg;
+        }
+        if (data.done) {
+          scanning = false;
+          document.getElementById('scanBtn').disabled = false;
+          logTerminal('✓ Scan complete');
+          eventSource.close();
+        }
+      });
+
+      eventSource.addEventListener('dns', (e) => {
+        const data = JSON.parse(e.data);
+        clearModule('dns');
+        if (data.error) {
+          modules.dns.querySelector('.module-content').innerHTML = `<div class="error">Error: ${data.error}</div>`;
+          return;
+        }
+        let html = '';
+        for (const [type, records] of Object.entries(data)) {
+          if (Array.isArray(records) && records.length > 0) {
+            html += `<div><span class="record-label">${type}:</span></div>`;
+            for (const r of records) {
+              const val = r.data || r.name || JSON.stringify(r);
+              html += `<div class="record" style="margin-left: 8px;">${val}</div>`;
+            }
+          }
+        }
+        modules.dns.querySelector('.module-content').innerHTML = html || 'No records found';
+      });
+
+      eventSource.addEventListener('ports', (e) => {
+        const data = JSON.parse(e.data);
+        clearModule('ports');
+        if (data.error) {
+          modules.ports.querySelector('.module-content').innerHTML = `<div class="error">Error: ${data.error}</div>`;
+          return;
+        }
+        const open = data.filter(p => p.status === 'open');
+        const closed = data.filter(p => p.status === 'closed');
+        const filtered = data.filter(p => p.status === 'filtered');
+
+        let html = `<div><strong>Open: ${open.length}</strong></div>`;
+        for (const p of open) {
+          html += `<span class="port-chip port-open">${p.port}</span>`;
+        }
+        html += `<div style="margin-top: 8px;"><strong>Closed: ${closed.length}</strong></div>`;
+        html += `<div style="margin-top: 8px;"><strong>Filtered: ${filtered.length}</strong></div>`;
+        modules.ports.querySelector('.module-content').innerHTML = html;
+      });
+
+      eventSource.addEventListener('whois', (e) => {
+        const data = JSON.parse(e.data);
+        const content = modules.whois?.querySelector('.module-content') || document.createElement('div');
+        if (data.error) {
+          content.innerHTML = `<div class="error">Error: ${data.error}</div>`;
+          return;
+        }
+        const p = data.parsed || {};
+        let html = '';
+        if (p.registrar) html += `<div class="record"><span class="record-label">Registrar:</span> ${p.registrar}</div>`;
+        if (p.created) html += `<div class="record"><span class="record-label">Created:</span> ${p.created}</div>`;
+        if (p.expires) html += `<div class="record"><span class="record-label">Expires:</span> ${p.expires}</div>`;
+        if (p.updated) html += `<div class="record"><span class="record-label">Updated:</span> ${p.updated}</div>`;
+        if (p.nameservers) html += `<div class="record"><span class="record-label">NS:</span> ${p.nameservers.join(', ')}</div>`;
+        if (p.privacy) html += `<div class="record"><span class="record-label">Privacy:</span> Enabled</div>`;
+        content.innerHTML = html || 'No WHOIS data available';
+      });
+
+      eventSource.addEventListener('subdomains', (e) => {
+        const data = JSON.parse(e.data);
+        clearModule('subdomains');
+        if (data.error) {
+          modules.subdomains.querySelector('.module-content').innerHTML = `<div class="error">Error: ${data.error}</div>`;
+          return;
+        }
+        if (!Array.isArray(data)) {
+          modules.subdomains.querySelector('.module-content').innerHTML = '<div>Error parsing subdomains</div>';
+          return;
+        }
+        const live = data.filter(s => s.live);
+        let html = `<div><strong>Live: ${live.length}</strong></div>`;
+        for (const sub of live.slice(0, 20)) {
+          html += `<div class="record">${sub.subdomain}<br><span style="color: #666;">${sub.ips.join(', ')}</span></div>`;
+        }
+        if (data.length > 20) html += `<div style="color: #888; margin-top: 4px;">... and ${data.length - 20} more</div>`;
+        modules.subdomains.querySelector('.module-content').innerHTML = html;
+      });
+
+      eventSource.addEventListener('breaches', (e) => {
+        const data = JSON.parse(e.data);
+        const content = modules.breaches?.querySelector('.module-content') || document.createElement('div');
+        if (data.skipped) {
+          content.innerHTML = '<div style="color: #888;">No email provided</div>';
+          return;
+        }
+        if (data.error) {
+          content.innerHTML = `<div class="error">Error: ${data.error}</div>`;
+          return;
+        }
+        if (data.count === 0) {
+          content.innerHTML = '<div class="success">✓ No breaches found</div>';
+          return;
+        }
+        let html = `<div class="error"><strong>Found in ${data.count} breaches:</strong></div>`;
+        for (const b of data.breaches.slice(0, 10)) {
+          html += `<div class="record">${b.Name} (${b.BreachDate})</div>`;
+        }
+        content.innerHTML = html;
+      });
+
+      eventSource.addEventListener('tech', (e) => {
+        const data = JSON.parse(e.data);
+        clearModule('tech');
+        if (data.error) {
+          modules.tech.querySelector('.module-content').innerHTML = `<div class="error">Error: ${data.error}</div>`;
+          return;
+        }
+        let html = `<div style="margin-bottom: 8px;"><strong>Status: ${data.statusCode || 'N/A'}</strong></div>`;
+        if (data.tech && data.tech.length > 0) {
+          for (const t of data.tech) {
+            html += `<div class="record"><strong>${t.name}</strong><br><span style="color: #888;">${t.category}</span></div>`;
+          }
+        } else {
+          html += '<div style="color: #888;">No technologies detected</div>';
+        }
+        modules.tech.querySelector('.module-content').innerHTML = html;
+      });
+
+      eventSource.addEventListener('headers', (e) => {
+        const data = JSON.parse(e.data);
+        const content = modules.headers?.querySelector('.module-content') || document.createElement('div');
+        if (data.error) {
+          content.innerHTML = `<div class="error">Error: ${data.error}</div>`;
+          return;
+        }
+        let html = `<div><strong>Grade: ${data.letterGrade} (${data.score}/100)</strong></div>`;
+        const missing = (data.audit || []).filter(h => !h.present);
+        if (missing.length > 0) {
+          html += `<div style="color: #ff6b6b; margin-top: 6px;">Missing ${missing.length}:</div>`;
+          for (const h of missing.slice(0, 5)) {
+            html += `<div class="record">${h.name}</div>`;
+          }
+        }
+        content.innerHTML = html;
+      });
+
+      eventSource.addEventListener('findings', (e) => {
+        const findings = JSON.parse(e.data);
+        for (const f of findings) {
+          addFinding(f.severity, f.title, f.detail, f.module);
+        }
+      });
+
+      eventSource.addEventListener('error', () => {
+        logTerminal('Connection error', true);
+        scanning = false;
+        document.getElementById('scanBtn').disabled = false;
+        eventSource.close();
+      });
+    }
+
+    // Init
+    updateClock();
+    setInterval(updateClock, 1000);
+  </script>
+</body>
+</html>

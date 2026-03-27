@@ -184,9 +184,13 @@
     .h-target { font-weight: 600; color: var(--text); font-size: 11px; }
     .h-ts { font-size: 9px; color: var(--text3); margin-top: 2px; }
     .h-counts { display: flex; gap: 4px; margin-left: auto; flex-shrink: 0; }
-    .h-del { margin-left: 6px; background: none; border: none; color: var(--text3); cursor: pointer; font-size: 14px; flex-shrink: 0; }
+    .h-del { margin-left: 4px; background: none; border: none; color: var(--text3); cursor: pointer; font-size: 14px; flex-shrink: 0; }
     .h-del:hover { color: var(--red); }
+    .h-share { margin-left: 4px; background: none; border: none; color: var(--text3); cursor: pointer; font-size: 12px; flex-shrink: 0; }
+    .h-share:hover { color: var(--cyan); }
     .h-empty { color: var(--text3); font-size: 10.5px; padding: 16px; text-align: center; }
+    #share-toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--bg2); border: 1px solid var(--border); border-left: 3px solid var(--cyan); color: var(--cyan); padding: 9px 16px; font-size: 10.5px; z-index: 500; display: none; white-space: nowrap; }
+    #username-tag { font-size: 9.5px; color: var(--text3); white-space: nowrap; }
 
     /* ── SHODAN SERVICE ── */
     .svc-row { padding: 3px 6px; margin-bottom: 2px; background: rgba(255,255,255,0.02); border-left: 2px solid var(--border2); }
@@ -211,6 +215,8 @@
       <button class="icon-btn" id="history-btn" title="Scan history (Ctrl+H)">◷</button>
       <button class="icon-btn" id="settings-btn" title="API Keys">⚙</button>
       <button class="icon-btn" id="theme-btn" title="Toggle theme (Ctrl+T)">◑</button>
+      <a class="icon-btn" id="admin-btn" href="/admin" title="Admin panel" style="display:none;text-decoration:none;font-size:10px;font-weight:700;">ADM</a>
+      <span id="username-tag"></span>
       <button class="icon-btn" id="logout-btn" title="Logout" onclick="location.href='/api/logout'" style="display:none;">⏏</button>
       <div id="clock"></div>
     </div>
@@ -335,6 +341,9 @@
     </div>
   </div>
 </div>
+
+<!-- SHARE TOAST -->
+<div id="share-toast"></div>
 
 <!-- HISTORY OVERLAY -->
 <div id="history-overlay"></div>
@@ -651,10 +660,25 @@
             ${item.medium?`<span class="fcnt fcnt-m" style="display:inline;">${item.medium}M</span>`:''}
             ${item.low?`<span class="fcnt fcnt-l" style="display:inline;">${item.low}L</span>`:''}
           </div>
+          <button class="h-share" data-id="${esc(item.id)}" title="Share report">⬡</button>
           <button class="h-del" data-id="${esc(item.id)}" title="Delete">×</button>`;
         div.addEventListener('click', (e) => {
           if (e.target.classList.contains('h-del')) return;
           loadHistoryScan(item.id);
+        });
+        div.querySelector('.h-share').addEventListener('click', async (e) => {
+          e.stopPropagation();
+          try {
+            const r = await fetch(`/api/history/${item.id}/share`, { method: 'POST' });
+            const d = await r.json();
+            if (d.url) {
+              try { await navigator.clipboard.writeText(d.url); } catch {}
+              const t = el('share-toast');
+              t.textContent = '⬡ Link copied: ' + d.url;
+              t.style.display = 'block';
+              setTimeout(() => { t.style.display = 'none'; }, 5000);
+            }
+          } catch {}
         });
         div.querySelector('.h-del').addEventListener('click', async (e) => {
           e.stopPropagation();
@@ -768,6 +792,11 @@
 
     es.addEventListener('status', (e) => {
       const d = JSON.parse(e.data);
+      if (d.queued) {
+        el('scan-btn').textContent = `QUEUED #${d.position}`;
+        log(d.msg, 'info');
+        return;
+      }
       if (d.module && d.done) { setModState(d.module, d.error?'error':'done'); setBadge(d.module, d.error?'error':'done', d.error?'ERROR':'DONE'); }
       if (d.msg) log(d.msg, d.error?'err':'');
     });
@@ -851,25 +880,30 @@
     },
     {
       title: 'Configure API Keys',
-      render: () => `
+      render: () => {
+        const ks = window._keyStatus || {};
+        const badge = (ok) => ok
+          ? `<span style="color:var(--green);font-size:9px;font-weight:400;">✓ configured</span>`
+          : `<span style="color:var(--text3);font-size:9px;font-weight:400;">not set</span>`;
+        return `
         <div style="font-size:10.5px;color:var(--text2);margin-bottom:16px;line-height:1.7;">Some modules require API keys. Add them here — they're saved on the server and never leave it. You can update them anytime via the ⚙ button.</div>
         <div style="margin-bottom:11px;">
-          <div style="font-size:9.5px;font-weight:600;color:var(--text2);letter-spacing:1px;text-transform:uppercase;margin-bottom:5px;">HIBP API Key <span style="color:var(--text3);font-weight:400;">(breach check)</span></div>
-          <input type="password" id="ob-hibp" class="inp" style="width:100%;" placeholder="Paste key...">
-          <div style="font-size:9px;color:var(--text3);margin-top:2px;">haveibeenpwned.com/API/Key · Free tier works</div>
+          <div style="font-size:9.5px;font-weight:600;color:var(--text2);letter-spacing:1px;text-transform:uppercase;margin-bottom:5px;">HIBP API Key <span style="color:var(--text3);font-weight:400;">(breach check)</span> ${badge(ks.hibpConfigured)}</div>
+          <input type="password" id="ob-hibp" class="inp" style="width:100%;" placeholder="${ks.hibpConfigured ? 'Already configured — paste to update' : 'Paste key...'}">
+          <div style="font-size:9px;color:var(--text3);margin-top:2px;">haveibeenpwned.com/API/Key · $3.50/mo</div>
         </div>
         <div style="margin-bottom:11px;">
-          <div style="font-size:9.5px;font-weight:600;color:var(--text2);letter-spacing:1px;text-transform:uppercase;margin-bottom:5px;">AbuseIPDB API Key <span style="color:var(--text3);font-weight:400;">(IP reputation)</span></div>
-          <input type="password" id="ob-abuse" class="inp" style="width:100%;" placeholder="Paste key...">
+          <div style="font-size:9.5px;font-weight:600;color:var(--text2);letter-spacing:1px;text-transform:uppercase;margin-bottom:5px;">AbuseIPDB API Key <span style="color:var(--text3);font-weight:400;">(IP reputation)</span> ${badge(ks.abuseConfigured)}</div>
+          <input type="password" id="ob-abuse" class="inp" style="width:100%;" placeholder="${ks.abuseConfigured ? 'Already configured — paste to update' : 'Paste key...'}">
           <div style="font-size:9px;color:var(--text3);margin-top:2px;">abuseipdb.com/account/api · Free tier works</div>
         </div>
         <div style="margin-bottom:4px;">
-          <div style="font-size:9.5px;font-weight:600;color:var(--text2);letter-spacing:1px;text-transform:uppercase;margin-bottom:5px;">Shodan API Key <span style="color:var(--text3);font-weight:400;">(CVEs + banners)</span></div>
-          <input type="password" id="ob-shodan" class="inp" style="width:100%;" placeholder="Paste key...">
-          <div style="font-size:9px;color:var(--text3);margin-top:2px;">account.shodan.io · Requires paid plan for full results</div>
+          <div style="font-size:9.5px;font-weight:600;color:var(--text2);letter-spacing:1px;text-transform:uppercase;margin-bottom:5px;">Shodan API Key <span style="color:var(--text3);font-weight:400;">(CVEs + banners)</span> ${badge(ks.shodanConfigured)}</div>
+          <input type="password" id="ob-shodan" class="inp" style="width:100%;" placeholder="${ks.shodanConfigured ? 'Already configured — paste to update' : 'Paste key...'}">
+          <div style="font-size:9px;color:var(--text3);margin-top:2px;">account.shodan.io · Free tier limited</div>
         </div>
-        <div id="ob-keys-msg" style="font-size:10px;color:var(--green);margin-top:8px;"></div>
-      `,
+        <div id="ob-keys-msg" style="font-size:10px;color:var(--green);margin-top:8px;"></div>`;
+      },
       onNext: async () => {
         const keys = {};
         const hibp = el('ob-hibp')?.value?.trim();
@@ -982,7 +1016,16 @@
       if (r.ok) {
         const user = await r.json();
         el('logout-btn').style.display = '';
-        if (!user.onboarded) showOnboarding();
+        el('username-tag').textContent = user.username;
+        if (user.isAdmin) el('admin-btn').style.display = '';
+        if (!user.onboarded) {
+          // Pre-fetch key status for onboarding step 2
+          try {
+            const sr = await fetch('/api/settings');
+            if (sr.ok) window._keyStatus = await sr.json();
+          } catch {}
+          showOnboarding();
+        }
       }
     } catch {}
   })();

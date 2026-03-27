@@ -23,7 +23,7 @@ const pool = process.env.DATABASE_URL
   ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
   : null;
 
-// ─── FILE-BASED STORAGE (fallback when no DATABASE_URL) ──────────────────────
+// ─── FILE-BASED STORAGE ───────────────────────────────────────────────────────
 const DATA_DIR = path.join(__dirname, 'data');
 const HISTORY_DIR = path.join(__dirname, 'history');
 fsSync.mkdirSync(DATA_DIR, { recursive: true });
@@ -41,64 +41,49 @@ async function fileSaveUsers(users) {
 // ─── DB INIT ─────────────────────────────────────────────────────────────────
 async function initDB() {
   if (!pool) {
-    // File mode: load config into process.env
     try {
       const cfg = JSON.parse(fsSync.readFileSync(CONFIG_FILE, 'utf8'));
       for (const [k, v] of Object.entries(cfg)) { if (v) process.env[k] = v; }
     } catch {}
     return;
   }
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      username TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      created_at TIMESTAMPTZ DEFAULT NOW(),
-      onboarded BOOLEAN DEFAULT FALSE
-    );
-    CREATE TABLE IF NOT EXISTS scan_history (
-      id TEXT PRIMARY KEY,
-      ts TIMESTAMPTZ DEFAULT NOW(),
-      target TEXT NOT NULL,
-      email TEXT,
-      total_findings INT DEFAULT 0,
-      high_count INT DEFAULT 0,
-      medium_count INT DEFAULT 0,
-      low_count INT DEFAULT 0,
-      info_count INT DEFAULT 0,
-      results JSONB,
-      findings JSONB
-    );
-    CREATE TABLE IF NOT EXISTS settings (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-  `);
-  // Load API keys from DB into process.env
+  await pool.query(`CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(), onboarded BOOLEAN DEFAULT FALSE, is_admin BOOLEAN DEFAULT FALSE
+  )`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS scan_history (
+    id TEXT PRIMARY KEY, ts TIMESTAMPTZ DEFAULT NOW(), user_id TEXT, target TEXT NOT NULL, email TEXT,
+    total_findings INT DEFAULT 0, high_count INT DEFAULT 0, medium_count INT DEFAULT 0,
+    low_count INT DEFAULT 0, info_count INT DEFAULT 0, results JSONB, findings JSONB, share_token TEXT UNIQUE
+  )`);
+  await pool.query(`ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS user_id TEXT`);
+  await pool.query(`ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS share_token TEXT`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
   const { rows } = await pool.query('SELECT key, value FROM settings');
   for (const { key, value } of rows) { if (value) process.env[key] = value; }
 }
 
-// ─── DUAL-MODE USER OPERATIONS ───────────────────────────────────────────────
+// ─── DUAL-MODE USER OPS ───────────────────────────────────────────────────────
 async function dbFindUser(username) {
   if (!pool) {
-    return fileLoadUsers().find(u => u.username.toLowerCase() === username.toLowerCase()) || null;
+    const u = fileLoadUsers().find(u => u.username.toLowerCase() === username.toLowerCase());
+    return u || null;
   }
   const { rows } = await pool.query(
-    'SELECT id, username, password_hash AS "passwordHash", onboarded, created_at AS "createdAt" FROM users WHERE LOWER(username) = LOWER($1)',
-    [username]
-  );
+    `SELECT id, username, password_hash AS "passwordHash", onboarded, is_admin AS "isAdmin", created_at AS "createdAt"
+     FROM users WHERE LOWER(username) = LOWER($1)`, [username]);
   return rows[0] || null;
 }
 
 async function dbFindUserById(id) {
   if (!pool) {
-    return fileLoadUsers().find(u => u.id === id) || null;
+    const u = fileLoadUsers().find(u => u.id === id);
+    return u || null;
   }
   const { rows } = await pool.query(
-    'SELECT id, username, password_hash AS "passwordHash", onboarded, created_at AS "createdAt" FROM users WHERE id = $1',
-    [id]
-  );
+    `SELECT id, username, password_hash AS "passwordHash", onboarded, is_admin AS "isAdmin", created_at AS "createdAt"
+     FROM users WHERE id = $1`, [id]);
   return rows[0] || null;
 }
 
@@ -106,33 +91,62 @@ async function dbCreateUser(user) {
   if (!pool) {
     const users = fileLoadUsers();
     if (users.find(u => u.username.toLowerCase() === user.username.toLowerCase())) return false;
+    if (users.length === 0) user.isAdmin = true;
     users.push(user);
     await fileSaveUsers(users);
     return true;
   }
+  const { rows: c } = await pool.query('SELECT COUNT(*) FROM users');
+  const isFirst = parseInt(c[0].count) === 0;
+  if (isFirst) user.isAdmin = true;
   try {
     await pool.query(
-      'INSERT INTO users (id, username, password_hash, onboarded) VALUES ($1, $2, $3, $4)',
-      [user.id, user.username, user.passwordHash, user.onboarded || false]
-    );
+      `INSERT INTO users (id, username, password_hash, onboarded, is_admin) VALUES ($1,$2,$3,$4,$5)`,
+      [user.id, user.username, user.passwordHash, user.onboarded || false, isFirst]);
     return true;
-  } catch (e) {
-    if (e.code === '23505') return false; // unique violation
-    throw e;
-  }
+  } catch (e) { if (e.code === '23505') return false; throw e; }
 }
 
 async function dbSetOnboarded(userId) {
   if (!pool) {
     const users = fileLoadUsers();
-    const user = users.find(u => u.id === userId);
-    if (!user) return false;
-    user.onboarded = true;
+    const u = users.find(u => u.id === userId);
+    if (!u) return false;
+    u.onboarded = true;
     await fileSaveUsers(users);
     return true;
   }
   await pool.query('UPDATE users SET onboarded = TRUE WHERE id = $1', [userId]);
   return true;
+}
+
+async function dbGetAllUsers() {
+  if (!pool) {
+    return fileLoadUsers().map(u => ({ id: u.id, username: u.username, createdAt: u.createdAt, isAdmin: u.isAdmin || false, onboarded: u.onboarded }));
+  }
+  const { rows } = await pool.query(
+    `SELECT id, username, created_at AS "createdAt", is_admin AS "isAdmin", onboarded FROM users ORDER BY created_at`);
+  return rows;
+}
+
+async function dbDeleteUser(userId) {
+  if (!pool) {
+    // delete their history files
+    try {
+      const files = (await fs.readdir(HISTORY_DIR)).filter(f => f.endsWith('.json'));
+      for (const f of files) {
+        try {
+          const d = JSON.parse(await fs.readFile(path.join(HISTORY_DIR, f), 'utf8'));
+          if (d.userId === userId) await fs.unlink(path.join(HISTORY_DIR, f));
+        } catch {}
+      }
+    } catch {}
+    const users = fileLoadUsers().filter(u => u.id !== userId);
+    await fileSaveUsers(users);
+    return;
+  }
+  await pool.query('DELETE FROM scan_history WHERE user_id = $1', [userId]);
+  await pool.query('DELETE FROM users WHERE id = $1', [userId]);
 }
 
 // ─── DUAL-MODE SETTINGS ───────────────────────────────────────────────────────
@@ -145,72 +159,114 @@ async function dbSaveSettings(updates) {
     return;
   }
   for (const [key, value] of Object.entries(updates)) {
-    await pool.query(
-      'INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2',
-      [key, value]
-    );
+    await pool.query(`INSERT INTO settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=$2`, [key, value]);
   }
 }
 
 // ─── DUAL-MODE HISTORY ────────────────────────────────────────────────────────
-async function dbSaveHistory(id, target, email, results, findings) {
+async function dbSaveHistory(id, userId, target, email, results, findings) {
   const counts = { high: 0, medium: 0, low: 0, info: 0 };
   for (const f of findings) counts[f.severity] = (counts[f.severity] || 0) + 1;
   if (!pool) {
     try {
-      await fs.writeFile(
-        path.join(HISTORY_DIR, `${id}.json`),
-        JSON.stringify({ id, ts: new Date().toISOString(), target, email: email || null, total: findings.length, ...counts, results, findings })
-      );
+      await fs.writeFile(path.join(HISTORY_DIR, `${id}.json`),
+        JSON.stringify({ id, ts: new Date().toISOString(), userId, target, email: email || null, total: findings.length, ...counts, results, findings }));
     } catch {}
     return;
   }
   try {
     await pool.query(
-      `INSERT INTO scan_history (id, target, email, total_findings, high_count, medium_count, low_count, info_count, results, findings)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [id, target, email || null, findings.length, counts.high, counts.medium, counts.low, counts.info, JSON.stringify(results), JSON.stringify(findings)]
-    );
+      `INSERT INTO scan_history (id,user_id,target,email,total_findings,high_count,medium_count,low_count,info_count,results,findings)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [id, userId, target, email || null, findings.length, counts.high, counts.medium, counts.low, counts.info, JSON.stringify(results), JSON.stringify(findings)]);
   } catch {}
 }
 
-async function dbGetHistory() {
+async function dbGetHistory(userId, isAdmin) {
   if (!pool) {
     try {
       const files = (await fs.readdir(HISTORY_DIR)).filter(f => f.endsWith('.json')).sort().reverse().slice(0, 100);
       const items = await Promise.allSettled(files.map(async f => {
         const d = JSON.parse(await fs.readFile(path.join(HISTORY_DIR, f), 'utf8'));
-        return { id: d.id, ts: d.ts, target: d.target, total: d.total, high: d.high, medium: d.medium, low: d.low, info: d.info };
+        if (!isAdmin && d.userId && d.userId !== userId) return null;
+        return { id: d.id, ts: d.ts, target: d.target, total: d.total, high: d.high, medium: d.medium, low: d.low, info: d.info, userId: d.userId };
       }));
-      return items.filter(r => r.status === 'fulfilled').map(r => r.value);
+      return items.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
     } catch { return []; }
   }
-  const { rows } = await pool.query(
-    `SELECT id, ts, target, total_findings AS total, high_count AS high, medium_count AS medium, low_count AS low, info_count AS info
-     FROM scan_history ORDER BY ts DESC LIMIT 100`
-  );
+  const q = isAdmin
+    ? `SELECT id,ts,user_id AS "userId",target,total_findings AS total,high_count AS high,medium_count AS medium,low_count AS low,info_count AS info FROM scan_history ORDER BY ts DESC LIMIT 100`
+    : `SELECT id,ts,user_id AS "userId",target,total_findings AS total,high_count AS high,medium_count AS medium,low_count AS low,info_count AS info FROM scan_history WHERE user_id=$1 OR user_id IS NULL ORDER BY ts DESC LIMIT 100`;
+  const { rows } = await pool.query(q, isAdmin ? [] : [userId]);
   return rows;
 }
 
-async function dbGetHistoryItem(id) {
+async function dbGetHistoryItem(id, userId, isAdmin) {
   if (!pool) {
     const safe = id.replace(/[^a-z0-9]/gi, '');
-    return JSON.parse(await fs.readFile(path.join(HISTORY_DIR, `${safe}.json`), 'utf8'));
+    const d = JSON.parse(await fs.readFile(path.join(HISTORY_DIR, `${safe}.json`), 'utf8'));
+    if (!isAdmin && d.userId && d.userId !== userId) throw new Error('Not found');
+    return d;
   }
-  const { rows } = await pool.query('SELECT * FROM scan_history WHERE id = $1', [id]);
+  const q = isAdmin
+    ? `SELECT * FROM scan_history WHERE id=$1`
+    : `SELECT * FROM scan_history WHERE id=$1 AND (user_id=$2 OR user_id IS NULL)`;
+  const { rows } = await pool.query(q, isAdmin ? [id] : [id, userId]);
+  if (!rows[0]) throw new Error('Not found');
+  const r = rows[0];
+  return { id: r.id, ts: r.ts, userId: r.user_id, target: r.target, email: r.email, total: r.total_findings, high: r.high_count, medium: r.medium_count, low: r.low_count, info: r.info_count, results: r.results, findings: r.findings, shareToken: r.share_token };
+}
+
+async function dbDeleteHistory(id, userId, isAdmin) {
+  if (!pool) {
+    const safe = id.replace(/[^a-z0-9]/gi, '');
+    const fPath = path.join(HISTORY_DIR, `${safe}.json`);
+    const d = JSON.parse(await fs.readFile(fPath, 'utf8'));
+    if (!isAdmin && d.userId && d.userId !== userId) throw new Error('Not found');
+    await fs.unlink(fPath);
+    return;
+  }
+  const q = isAdmin
+    ? `DELETE FROM scan_history WHERE id=$1`
+    : `DELETE FROM scan_history WHERE id=$1 AND (user_id=$2 OR user_id IS NULL)`;
+  const { rowCount } = await pool.query(q, isAdmin ? [id] : [id, userId]);
+  if (!rowCount) throw new Error('Not found');
+}
+
+async function dbGenerateShareToken(id, userId, isAdmin) {
+  const token = crypto.randomBytes(20).toString('hex');
+  if (!pool) {
+    const safe = id.replace(/[^a-z0-9]/gi, '');
+    const fPath = path.join(HISTORY_DIR, `${safe}.json`);
+    const d = JSON.parse(await fs.readFile(fPath, 'utf8'));
+    if (!isAdmin && d.userId && d.userId !== userId) throw new Error('Not found');
+    d.shareToken = token;
+    await fs.writeFile(fPath, JSON.stringify(d));
+    return token;
+  }
+  const q = isAdmin
+    ? `UPDATE scan_history SET share_token=$1 WHERE id=$2 RETURNING id`
+    : `UPDATE scan_history SET share_token=$1 WHERE id=$2 AND (user_id=$3 OR user_id IS NULL) RETURNING id`;
+  const { rows } = await pool.query(q, isAdmin ? [token, id] : [token, id, userId]);
+  if (!rows.length) throw new Error('Not found');
+  return token;
+}
+
+async function dbGetHistoryByToken(token) {
+  if (!pool) {
+    const files = await fs.readdir(HISTORY_DIR).catch(() => []);
+    for (const f of files.filter(f => f.endsWith('.json'))) {
+      try {
+        const d = JSON.parse(await fs.readFile(path.join(HISTORY_DIR, f), 'utf8'));
+        if (d.shareToken === token) return d;
+      } catch {}
+    }
+    throw new Error('Not found');
+  }
+  const { rows } = await pool.query('SELECT * FROM scan_history WHERE share_token=$1', [token]);
   if (!rows[0]) throw new Error('Not found');
   const r = rows[0];
   return { id: r.id, ts: r.ts, target: r.target, email: r.email, total: r.total_findings, high: r.high_count, medium: r.medium_count, low: r.low_count, info: r.info_count, results: r.results, findings: r.findings };
-}
-
-async function dbDeleteHistory(id) {
-  if (!pool) {
-    const safe = id.replace(/[^a-z0-9]/gi, '');
-    await fs.unlink(path.join(HISTORY_DIR, `${safe}.json`));
-    return;
-  }
-  const { rowCount } = await pool.query('DELETE FROM scan_history WHERE id = $1', [id]);
-  if (!rowCount) throw new Error('Not found');
 }
 
 // ─── PASSWORD UTILS ───────────────────────────────────────────────────────────
@@ -241,9 +297,9 @@ function parseCookies(header) {
   return c;
 }
 
-function createSession(userId, username) {
+function createSession(userId, username, isAdmin = false) {
   const token = crypto.randomBytes(32).toString('hex');
-  sessions.set(token, { userId, username, expiry: Date.now() + 24 * 60 * 60 * 1000 });
+  sessions.set(token, { userId, username, isAdmin, expiry: Date.now() + 24 * 60 * 60 * 1000 });
   return token;
 }
 
@@ -271,12 +327,42 @@ function rateLimit(req, res, next) {
 }
 setInterval(() => { const now = Date.now(); for (const [ip, r] of rateLimits) if (now > r.resetAt) rateLimits.delete(ip); }, 5 * 60 * 1000);
 
+// ─── SCAN QUEUE ──────────────────────────────────────────────────────────────
+const MAX_CONCURRENT_SCANS = parseInt(process.env.MAX_SCANS || '3');
+let activeScans = 0;
+const scanQueue = [];
+
+function acquireScanSlot() {
+  return new Promise((resolve) => {
+    if (activeScans < MAX_CONCURRENT_SCANS) { activeScans++; resolve(); }
+    else scanQueue.push(resolve);
+  });
+}
+
+function releaseScanSlot() {
+  if (scanQueue.length > 0) { const next = scanQueue.shift(); next(); }
+  else activeScans--;
+}
+
 // ─── AUTH MIDDLEWARE ─────────────────────────────────────────────────────────
 function requireAuth(req, res, next) {
   req.user = getSession(req);
   if (req.user) return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
   res.redirect('/login');
+}
+
+function requireAdmin(req, res, next) {
+  req.user = getSession(req);
+  if (!req.user) {
+    if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
+    return res.redirect('/login');
+  }
+  if (!req.user.isAdmin) {
+    if (req.path.startsWith('/api/')) return res.status(403).json({ error: 'Forbidden' });
+    return res.status(403).send('Access denied');
+  }
+  next();
 }
 
 // ─── LOGIN PAGE ──────────────────────────────────────────────────────────────
@@ -340,7 +426,7 @@ input::placeholder{color:#444458}
 </div>
 <script>
 function switchTab(t) {
-  document.querySelectorAll('.tab').forEach((el,i)=>el.classList.toggle('active', (t==='login'&&i===0)||(t==='register'&&i===1)));
+  document.querySelectorAll('.tab').forEach((el,i)=>el.classList.toggle('active',(t==='login'&&i===0)||(t==='register'&&i===1)));
   document.querySelectorAll('.form-section').forEach((el,i)=>el.classList.toggle('active',(t==='login'&&i===0)||(t==='register'&&i===1)));
 }
 ${opts.autoTab ? `switchTab('${opts.autoTab}');` : ''}
@@ -357,16 +443,12 @@ app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.send(loginPage({ loginErr: 'Username and password required.' }));
   let user;
-  try {
-    user = await dbFindUser(username);
-  } catch (err) {
-    console.error('Login error:', err);
-    return res.send(loginPage({ loginErr: 'Server error. Please try again.' }));
-  }
+  try { user = await dbFindUser(username); }
+  catch (err) { console.error('Login error:', err); return res.send(loginPage({ loginErr: 'Server error. Please try again.' })); }
   if (!user || !(await verifyPassword(password, user.passwordHash))) {
     return res.send(loginPage({ loginErr: 'Invalid username or password.' }));
   }
-  const token = createSession(user.id, user.username);
+  const token = createSession(user.id, user.username, user.isAdmin || false);
   res.setHeader('Set-Cookie', `to_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`);
   res.redirect('/');
 });
@@ -381,22 +463,12 @@ app.post('/api/register', async (req, res) => {
     return res.send(loginPage({ tab: 'register', registerErr: 'Password must be at least 8 characters.' }));
   if (password !== confirm)
     return res.send(loginPage({ tab: 'register', registerErr: 'Passwords do not match.' }));
-  const newUser = {
-    id: crypto.randomBytes(8).toString('hex'),
-    username,
-    passwordHash: await hashPassword(password),
-    createdAt: new Date().toISOString(),
-    onboarded: false,
-  };
+  const newUser = { id: crypto.randomBytes(8).toString('hex'), username, passwordHash: await hashPassword(password), createdAt: new Date().toISOString(), onboarded: false, isAdmin: false };
   let created;
-  try {
-    created = await dbCreateUser(newUser);
-  } catch (err) {
-    console.error('Register error:', err);
-    return res.send(loginPage({ tab: 'register', registerErr: 'Server error during registration. Please try again.' }));
-  }
+  try { created = await dbCreateUser(newUser); }
+  catch (err) { console.error('Register error:', err); return res.send(loginPage({ tab: 'register', registerErr: 'Server error during registration. Please try again.' })); }
   if (!created) return res.send(loginPage({ tab: 'register', registerErr: 'Username already taken.' }));
-  const token = createSession(newUser.id, newUser.username);
+  const token = createSession(newUser.id, newUser.username, newUser.isAdmin || false);
   res.setHeader('Set-Cookie', `to_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`);
   res.redirect('/');
 });
@@ -411,7 +483,7 @@ app.get('/api/logout', (req, res) => {
 app.get('/api/me', requireAuth, async (req, res) => {
   const user = await dbFindUserById(req.user.userId).catch(() => null);
   if (!user) return res.status(404).json({ error: 'User not found' });
-  res.json({ id: user.id, username: user.username, onboarded: user.onboarded, createdAt: user.createdAt });
+  res.json({ id: user.id, username: user.username, onboarded: user.onboarded, isAdmin: user.isAdmin || false, createdAt: user.createdAt });
 });
 
 app.post('/api/onboarding/complete', requireAuth, async (req, res) => {
@@ -419,7 +491,7 @@ app.post('/api/onboarding/complete', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ─── SETTINGS (API KEYS) ──────────────────────────────────────────────────────
+// ─── SETTINGS ────────────────────────────────────────────────────────────────
 app.get('/api/settings', requireAuth, (req, res) => {
   res.json({
     HIBP_API_KEY: process.env.HIBP_API_KEY ? '••••••••' : '',
@@ -436,15 +508,217 @@ app.post('/api/settings', requireAuth, async (req, res) => {
   const updates = {};
   for (const key of allowed) {
     if (req.body[key] !== undefined && req.body[key] !== '••••••••' && req.body[key] !== '') {
-      updates[key] = req.body[key];
-      process.env[key] = req.body[key];
+      updates[key] = req.body[key]; process.env[key] = req.body[key];
     }
   }
   await dbSaveSettings(updates).catch(() => {});
   res.json({ ok: true });
 });
 
-// ─── STATIC FILES (require auth) ─────────────────────────────────────────────
+// ─── ADMIN API ────────────────────────────────────────────────────────────────
+app.get('/api/admin/stats', requireAdmin, async (req, res) => {
+  try {
+    const users = await dbGetAllUsers();
+    const history = await dbGetHistory(null, true);
+    res.json({ userCount: users.length, scanCount: history.length });
+  } catch { res.json({ userCount: 0, scanCount: 0 }); }
+});
+
+app.get('/api/admin/users', requireAdmin, async (req, res) => {
+  try { res.json(await dbGetAllUsers()); } catch { res.json([]); }
+});
+
+app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  if (id === req.user.userId) return res.status(400).json({ error: 'Cannot delete yourself' });
+  try { await dbDeleteUser(id); res.json({ ok: true }); }
+  catch (e) { res.status(404).json({ error: e.message }); }
+});
+
+app.get('/api/admin/scans', requireAdmin, async (req, res) => {
+  try { res.json(await dbGetHistory(null, true)); } catch { res.json([]); }
+});
+
+// ─── SHARE ────────────────────────────────────────────────────────────────────
+app.post('/api/history/:id/share', requireAuth, async (req, res) => {
+  try {
+    const token = await dbGenerateShareToken(req.params.id, req.user.userId, req.user.isAdmin);
+    const url = `${req.protocol}://${req.get('host')}/report/${token}`;
+    res.json({ token, url });
+  } catch (e) { res.status(404).json({ error: e.message }); }
+});
+
+// ─── PUBLIC REPORT PAGE ───────────────────────────────────────────────────────
+app.get('/report/:token', async (req, res) => {
+  try {
+    const scan = await dbGetHistoryByToken(req.params.token);
+    const findings = scan.findings || [];
+    const high = findings.filter(f => f.severity === 'high').length;
+    const medium = findings.filter(f => f.severity === 'medium').length;
+    const low = findings.filter(f => f.severity === 'low').length;
+    const info = findings.filter(f => f.severity === 'info').length;
+    const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    const sevColor = s => ({high:'#ff2a2a',medium:'#f59e0b',low:'#00c8ff',info:'#8888a0'}[s]||'#8888a0');
+    const findingsHtml = findings.map(f => `
+      <div style="padding:10px 12px;margin-bottom:6px;background:#0a0a0e;border:1px solid #1a1a24;border-left:3px solid ${sevColor(f.severity)};">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;">
+          <span style="font-size:9px;font-weight:700;letter-spacing:1px;color:${sevColor(f.severity)};text-transform:uppercase;">${esc(f.severity)}</span>
+          <span style="font-size:9px;color:#444458;">${esc(f.module)}</span>
+        </div>
+        <div style="font-size:11px;font-weight:600;color:#e0e0e8;margin-bottom:2px;">${esc(f.title)}</div>
+        <div style="font-size:10px;color:#8888a0;">${esc(f.detail)}</div>
+      </div>`).join('');
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>THREATOPS Report — ${esc(scan.target)}</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#050507;color:#e0e0e8;font-family:'JetBrains Mono',monospace;padding:24px;max-width:860px;margin:0 auto;font-size:12px;}
+.logo{font-family:'Share Tech Mono',monospace;font-size:18px;color:#ff2a2a;letter-spacing:3px;margin-bottom:4px;}
+.hdr{border-bottom:1px solid #1a1a24;padding-bottom:16px;margin-bottom:20px;}
+.target{font-size:20px;font-weight:700;color:#e0e0e8;margin:12px 0 4px;}
+.meta{font-size:10px;color:#444458;}
+.counts{display:flex;gap:8px;margin:14px 0;}
+.cnt{padding:4px 10px;font-size:10px;font-weight:700;border:1px solid;}
+.cnt-h{color:#ff2a2a;border-color:rgba(255,42,42,.3);background:rgba(255,42,42,.08);}
+.cnt-m{color:#f59e0b;border-color:rgba(245,158,11,.3);background:rgba(245,158,11,.08);}
+.cnt-l{color:#00c8ff;border-color:rgba(0,200,255,.3);background:rgba(0,200,255,.08);}
+.cnt-i{color:#8888a0;border-color:#1a1a24;background:rgba(255,255,255,.03);}
+.sl{font-size:9.5px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#444458;border-bottom:1px solid #1a1a24;padding-bottom:5px;margin:18px 0 10px;}
+.footer{margin-top:32px;padding-top:16px;border-top:1px solid #1a1a24;font-size:9.5px;color:#444458;text-align:center;}
+</style>
+</head>
+<body>
+<div class="hdr">
+  <div class="logo">⚔ THREATOPS</div>
+  <div class="target">${esc(scan.target)}</div>
+  <div class="meta">Scan completed ${new Date(scan.ts).toUTCString()}${scan.email ? ' · ' + esc(scan.email) : ''}</div>
+  <div class="counts">
+    ${high ? `<span class="cnt cnt-h">${high} HIGH</span>` : ''}
+    ${medium ? `<span class="cnt cnt-m">${medium} MED</span>` : ''}
+    ${low ? `<span class="cnt cnt-l">${low} LOW</span>` : ''}
+    ${info ? `<span class="cnt cnt-i">${info} INFO</span>` : ''}
+    ${!findings.length ? '<span style="color:#444458;font-size:10px;">No findings</span>' : ''}
+  </div>
+</div>
+${findings.length ? `<div class="sl">Intelligence Findings</div>${findingsHtml}` : '<div style="color:#444458;font-size:11px;">No findings for this scan.</div>'}
+<div class="footer">Generated by THREATOPS Threat Intelligence Platform</div>
+</body></html>`);
+  } catch { res.status(404).send('Report not found or link expired.'); }
+});
+
+// ─── ADMIN PAGE ───────────────────────────────────────────────────────────────
+app.get('/admin', requireAdmin, (req, res) => {
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>THREATOPS // ADMIN</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#050507;color:#e0e0e8;font-family:'JetBrains Mono',monospace;font-size:12px;}
+.topbar{background:#0a0a0e;border-bottom:2px solid #ff2a2a;padding:0 20px;height:48px;display:flex;align-items:center;gap:12px;}
+.logo{font-family:'Share Tech Mono',monospace;font-size:17px;color:#ff2a2a;letter-spacing:3px;}
+.badge{background:rgba(255,42,42,.15);color:#ff2a2a;font-size:9px;font-weight:700;letter-spacing:1px;padding:2px 7px;border:1px solid rgba(255,42,42,.3);}
+.ml{margin-left:auto;display:flex;gap:8px;}
+.btn{height:28px;padding:0 12px;background:#0f0f14;border:1px solid #1a1a24;color:#8888a0;font-family:'JetBrains Mono',monospace;font-size:10px;cursor:pointer;text-decoration:none;display:flex;align-items:center;transition:all .15s;}
+.btn:hover{border-color:#00c8ff;color:#00c8ff;}
+.btn-r{background:rgba(255,42,42,.1);border-color:rgba(255,42,42,.3);color:#ff2a2a;}
+.btn-r:hover{background:rgba(255,42,42,.2);}
+.wrap{padding:20px;max-width:1100px;margin:0 auto;}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:20px;}
+.stat{background:#0a0a0e;border:1px solid #1a1a24;padding:14px 16px;}
+.stat-n{font-size:24px;font-weight:700;color:#e0e0e8;margin-bottom:3px;}
+.stat-l{font-size:9.5px;color:#444458;letter-spacing:1px;text-transform:uppercase;}
+.section{background:#0a0a0e;border:1px solid #1a1a24;margin-bottom:14px;}
+.sec-hdr{padding:10px 14px;border-bottom:1px solid #1a1a24;font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#8888a0;}
+table{width:100%;border-collapse:collapse;}
+td,th{padding:8px 14px;text-align:left;border-bottom:1px solid #1a1a24;font-size:10.5px;}
+th{font-size:9.5px;color:#444458;letter-spacing:1px;text-transform:uppercase;font-weight:600;}
+tr:last-child td{border-bottom:none;}
+tr:hover td{background:rgba(255,255,255,.02);}
+.tag{padding:1px 6px;font-size:8.5px;font-weight:700;letter-spacing:.5px;}
+.t-r{background:rgba(255,42,42,.1);color:#ff2a2a;border:1px solid rgba(255,42,42,.3);}
+.t-c{background:rgba(0,200,255,.1);color:#00c8ff;border:1px solid rgba(0,200,255,.3);}
+.del-btn{padding:2px 8px;background:rgba(255,42,42,.1);border:1px solid rgba(255,42,42,.2);color:#ff6b6b;font-size:9.5px;cursor:pointer;font-family:'JetBrains Mono',monospace;}
+.del-btn:hover{background:rgba(255,42,42,.2);}
+#toast{position:fixed;bottom:20px;right:20px;background:#0a0a0e;border:1px solid #1a1a24;border-left:3px solid #00e676;color:#00e676;padding:8px 14px;font-size:10.5px;display:none;}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="logo">⚔ THREATOPS</div>
+  <span class="badge">ADMIN</span>
+  <div class="ml">
+    <a href="/" class="btn">← Dashboard</a>
+    <a href="/api/logout" class="btn btn-r">Logout</a>
+  </div>
+</div>
+<div class="wrap">
+  <div class="stats" id="stats">
+    <div class="stat"><div class="stat-n" id="st-users">—</div><div class="stat-l">Total Users</div></div>
+    <div class="stat"><div class="stat-n" id="st-scans">—</div><div class="stat-l">Total Scans</div></div>
+  </div>
+  <div class="section">
+    <div class="sec-hdr">Users</div>
+    <table><thead><tr><th>Username</th><th>Joined</th><th>Role</th><th></th></tr></thead>
+    <tbody id="users-tbody"><tr><td colspan="4" style="color:#444458;">Loading...</td></tr></tbody></table>
+  </div>
+  <div class="section">
+    <div class="sec-hdr">Recent Scans (all users)</div>
+    <table><thead><tr><th>Target</th><th>User</th><th>Time</th><th>Findings</th></tr></thead>
+    <tbody id="scans-tbody"><tr><td colspan="4" style="color:#444458;">Loading...</td></tr></tbody></table>
+  </div>
+</div>
+<div id="toast"></div>
+<script>
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+function toast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.style.display='block'; setTimeout(()=>t.style.display='none',3000); }
+
+async function load() {
+  const [stats, users, scans] = await Promise.all([
+    fetch('/api/admin/stats').then(r=>r.json()),
+    fetch('/api/admin/users').then(r=>r.json()),
+    fetch('/api/admin/scans').then(r=>r.json()),
+  ]);
+  document.getElementById('st-users').textContent = stats.userCount;
+  document.getElementById('st-scans').textContent = stats.scanCount;
+
+  const utb = document.getElementById('users-tbody');
+  utb.innerHTML = users.length ? users.map(u => \`<tr>
+    <td style="font-weight:600;color:#e0e0e8;">\${esc(u.username)}</td>
+    <td style="color:#8888a0;">\${new Date(u.createdAt).toLocaleDateString()}</td>
+    <td>\${u.isAdmin ? '<span class="tag t-r">ADMIN</span>' : '<span class="tag t-c">USER</span>'}</td>
+    <td>\${u.isAdmin ? '' : \`<button class="del-btn" onclick="deleteUser('\${esc(u.id)}', '\${esc(u.username)}')">Delete</button>\`}</td>
+  </tr>\`).join('') : '<tr><td colspan="4" style="color:#444458;">No users</td></tr>';
+
+  const stb = document.getElementById('scans-tbody');
+  stb.innerHTML = scans.length ? scans.slice(0,50).map(s => \`<tr>
+    <td style="color:#e0e0e8;">\${esc(s.target)}</td>
+    <td style="color:#8888a0;">\${esc(s.userId||'—')}</td>
+    <td style="color:#8888a0;">\${new Date(s.ts).toLocaleString()}</td>
+    <td>\${s.high ? \`<span class="tag t-r" style="margin-right:3px;">\${s.high}H</span>\` : ''}\${s.medium ? \`<span style="color:#f59e0b;font-size:9.5px;">\${s.medium}M</span>\` : ''}</td>
+  </tr>\`).join('') : '<tr><td colspan="4" style="color:#444458;">No scans yet</td></tr>';
+}
+
+async function deleteUser(id, username) {
+  if (!confirm('Delete user ' + username + ' and all their scans?')) return;
+  const r = await fetch('/api/admin/users/' + id, { method: 'DELETE' });
+  if (r.ok) { toast('User deleted'); load(); }
+  else { const d = await r.json(); alert(d.error); }
+}
+
+load();
+</script>
+</body></html>`);
+});
+
+// ─── STATIC FILES ─────────────────────────────────────────────────────────────
 app.use(requireAuth);
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -759,17 +1033,17 @@ function generateFindings(results) {
 
 // ─── HISTORY ROUTES ───────────────────────────────────────────────────────────
 app.get('/api/history', requireAuth, async (req, res) => {
-  try { res.json(await dbGetHistory()); }
+  try { res.json(await dbGetHistory(req.user.userId, req.user.isAdmin)); }
   catch { res.json([]); }
 });
 
 app.get('/api/history/:id', requireAuth, async (req, res) => {
-  try { res.json(await dbGetHistoryItem(req.params.id.replace(/[^a-z0-9]/gi, ''))); }
+  try { res.json(await dbGetHistoryItem(req.params.id.replace(/[^a-z0-9]/gi, ''), req.user.userId, req.user.isAdmin)); }
   catch { res.status(404).json({ error: 'Not found' }); }
 });
 
 app.delete('/api/history/:id', requireAuth, async (req, res) => {
-  try { await dbDeleteHistory(req.params.id.replace(/[^a-z0-9]/gi, '')); res.json({ ok: true }); }
+  try { await dbDeleteHistory(req.params.id.replace(/[^a-z0-9]/gi, ''), req.user.userId, req.user.isAdmin); res.json({ ok: true }); }
   catch { res.status(404).json({ error: 'Not found' }); }
 });
 
@@ -790,6 +1064,14 @@ app.get('/api/scan', requireAuth, rateLimit, async (req, res) => {
   let closed = false; req.on('close', () => { closed = true; });
   const send = (ev, data) => { if (closed) return; try { res.write(`event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`); } catch {} };
   const hb = setInterval(() => { if (!closed) { try { res.write(': heartbeat\n\n'); } catch {} } }, 15000);
+
+  // Queue handling
+  if (activeScans >= MAX_CONCURRENT_SCANS) {
+    send('status', { msg: `Queued — position ${scanQueue.length + 1}. Waiting for a scan slot...`, queued: true, position: scanQueue.length + 1 });
+  }
+  await acquireScanSlot();
+
+  if (closed) { releaseScanSlot(); clearInterval(hb); return; }
 
   const scanId = Date.now().toString();
   send('status', { msg: `Scan initiated: ${domain}`, ts: new Date().toISOString() });
@@ -825,21 +1107,19 @@ app.get('/api/scan', requireAuth, rateLimit, async (req, res) => {
         (async () => { send('shodan', { error: 'Could not resolve IP' }); send('status', { module: 'shodan', done: true, error: true, msg: 'Shodan: no IP' }); })()]),
   ]);
 
+  releaseScanSlot();
   clearInterval(hb);
   const findings = generateFindings(R);
-  await dbSaveHistory(scanId, target, email || null, R, findings);
+  await dbSaveHistory(scanId, req.user.userId, target, email || null, R, findings);
   send('findings', findings);
   send('done', { scanId, ts: new Date().toISOString(), counts: { high: findings.filter(f => f.severity === 'high').length, medium: findings.filter(f => f.severity === 'medium').length, low: findings.filter(f => f.severity === 'low').length, info: findings.filter(f => f.severity === 'info').length } });
   res.end();
 });
 
-// ─── START (after DB init) ────────────────────────────────────────────────────
+// ─── START ────────────────────────────────────────────────────────────────────
 initDB()
   .then(() => {
     const PORT = process.env.PORT || 3000;
     app.listen(PORT, () => console.log(`THREATOPS running at http://localhost:${PORT} [${pool ? 'postgres' : 'file'} mode]`));
   })
-  .catch(err => {
-    console.error('DB init failed:', err);
-    process.exit(1);
-  });
+  .catch(err => { console.error('DB init failed:', err); process.exit(1); });

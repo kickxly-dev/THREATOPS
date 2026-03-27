@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: threatops
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: threatops-db
+          property: connectionString
+      - key: NODE_ENV
+        value: production
+      - key: HIBP_API_KEY
+        sync: false
+      - key: ABUSEIPDB_API_KEY
+        sync: false
+      - key: SHODAN_API_KEY
+        sync: false
+
+databases:
+  - name: threatops-db
+    databaseName: threatops
+    user: threatops
+    plan: free

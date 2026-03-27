@@ -243,6 +243,8 @@
     <div class="mod-ind" id="ind-httpPreview"><div class="dot"></div>PREV</div>
     <div class="mod-ind" id="ind-abuseipdb"><div class="dot"></div>ABUSE</div>
     <div class="mod-ind" id="ind-shodan"><div class="dot"></div>SHODAN</div>
+    <div class="mod-ind" id="ind-virustotal"><div class="dot"></div>VT</div>
+    <div class="mod-ind" id="ind-urlscan"><div class="dot"></div>URLSCAN</div>
     <div id="findings-bar">
       <span class="fcnt fcnt-h" id="cnt-h"></span>
       <span class="fcnt fcnt-m" id="cnt-m"></span>
@@ -275,6 +277,9 @@
         <div class="module" id="mod-httpPreview"><div class="module-hdr"><div class="module-title">HTTP Preview</div><div class="mbadge mbadge-idle" id="badge-httpPreview">IDLE</div></div><div class="mc" id="content-httpPreview"><div class="empty">Awaiting scan...</div></div></div>
         <div class="module" id="mod-abuseipdb"><div class="module-hdr"><div class="module-title">IP Reputation</div><div class="mbadge mbadge-idle" id="badge-abuseipdb">IDLE</div></div><div class="mc" id="content-abuseipdb"><div class="empty">Awaiting scan...</div></div></div>
         <div class="module" id="mod-shodan"><div class="module-hdr"><div class="module-title">Shodan</div><div class="mbadge mbadge-idle" id="badge-shodan">IDLE</div></div><div class="mc" id="content-shodan"><div class="empty">Awaiting scan...</div></div></div>
+        <!-- Row 6 -->
+        <div class="module" id="mod-virustotal"><div class="module-hdr"><div class="module-title">VirusTotal</div><div class="mbadge mbadge-idle" id="badge-virustotal">IDLE</div></div><div class="mc" id="content-virustotal"><div class="empty">Awaiting scan...</div></div></div>
+        <div class="module" id="mod-urlscan"><div class="module-hdr"><div class="module-title">URLScan.io</div><div class="mbadge mbadge-idle" id="badge-urlscan">IDLE</div></div><div class="mc" id="content-urlscan"><div class="empty">Awaiting scan...</div></div></div>
       </div>
       <div id="terminal"></div>
     </div>
@@ -334,14 +339,33 @@
       <input type="password" id="set-abuse" class="inp" style="width:100%;" placeholder="Enter key to update...">
       <div style="font-size:9px;color:var(--text3);margin-top:3px;">Get one at abuseipdb.com/account/api</div>
     </div>
-    <div style="margin-bottom:18px;">
+    <div style="margin-bottom:12px;">
       <div style="font-size:9.5px;font-weight:600;color:var(--text2);letter-spacing:1px;text-transform:uppercase;margin-bottom:5px;">Shodan API Key <span id="shodan-status" style="color:var(--text3);font-weight:400;"></span></div>
       <input type="password" id="set-shodan" class="inp" style="width:100%;" placeholder="Enter key to update...">
       <div style="font-size:9px;color:var(--text3);margin-top:3px;">Get one at account.shodan.io</div>
     </div>
+    <div style="margin-bottom:12px;">
+      <div style="font-size:9.5px;font-weight:600;color:var(--text2);letter-spacing:1px;text-transform:uppercase;margin-bottom:5px;">VirusTotal API Key <span id="vt-status" style="color:var(--text3);font-weight:400;"></span></div>
+      <input type="password" id="set-vt" class="inp" style="width:100%;" placeholder="Enter key to update...">
+      <div style="font-size:9px;color:var(--text3);margin-top:3px;">Get one at virustotal.com/gui/my-apikey</div>
+    </div>
+    <div style="margin-bottom:18px;">
+      <div style="font-size:9.5px;font-weight:600;color:var(--text2);letter-spacing:1px;text-transform:uppercase;margin-bottom:5px;">URLScan.io API Key <span id="urlscan-status" style="color:var(--text3);font-weight:400;"></span></div>
+      <input type="password" id="set-urlscan" class="inp" style="width:100%;" placeholder="Optional — for private submissions">
+      <div style="font-size:9px;color:var(--text3);margin-top:3px;">Optional — public search works without a key</div>
+    </div>
+    <div style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:14px;">
+      <div style="font-size:9.5px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--text2);margin-bottom:8px;">API Tokens <span style="font-size:9px;font-weight:400;color:var(--text3);">for CLI/scripts</span></div>
+      <div id="token-list" style="margin-bottom:8px;font-size:10px;color:var(--text3);">Loading...</div>
+      <div style="display:flex;gap:6px;">
+        <input type="text" id="token-name" class="inp" style="flex:1;" placeholder="Token name (e.g. homelab)">
+        <button id="token-create" style="height:28px;padding:0 12px;background:var(--bg3);border:1px solid var(--border);color:var(--cyan);font-family:'JetBrains Mono',monospace;font-size:10px;cursor:pointer;">+ Create</button>
+      </div>
+      <div id="token-new" style="display:none;margin-top:8px;padding:8px;background:var(--bg3);border:1px solid var(--green);font-size:10px;color:var(--green);word-break:break-all;"></div>
+    </div>
     <div style="display:flex;gap:8px;justify-content:flex-end;">
       <div id="settings-msg" style="flex:1;font-size:10px;color:var(--green);padding-top:6px;"></div>
-      <button id="settings-save" style="height:30px;padding:0 18px;background:var(--red);border:none;color:#fff;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:1px;cursor:pointer;text-transform:uppercase;">SAVE</button>
+      <button id="settings-save" style="height:30px;padding:0 18px;background:var(--red);border:none;color:#fff;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:1px;cursor:pointer;text-transform:uppercase;">SAVE KEYS</button>
     </div>
   </div>
 </div>
@@ -629,6 +653,31 @@
     return h || '<div class="empty">No Shodan data</div>';
   }
 
+  function renderVirusTotal(d) {
+    if (d.error) return `<div class="err-text">${esc(d.error)}</div>`;
+    const total = (d.malicious||0) + (d.suspicious||0) + (d.harmless||0) + (d.undetected||0);
+    const threatColor = d.malicious > 5 ? 'var(--red)' : d.malicious > 0 ? 'var(--yellow)' : 'var(--green)';
+    let h = `<div class="dr"><span class="dl">Malicious</span><span class="dv" style="color:${threatColor};font-weight:700;">${d.malicious||0} / ${total}</span></div>`;
+    if (d.suspicious) h += `<div class="dr"><span class="dl">Suspicious</span><span class="dv" style="color:var(--yellow);">${d.suspicious}</span></div>`;
+    h += `<div class="dr"><span class="dl">Reputation</span><span class="dv" style="color:${d.reputation<0?'var(--red)':'var(--green)'}">${d.reputation}</span></div>`;
+    if (d.categories?.length) { h += `<div class="dr"><span class="dl">Categories</span><span class="dv">${d.categories.map(esc).join(', ')}</span></div>`; }
+    return h;
+  }
+
+  function renderURLScan(d) {
+    if (d.error) return `<div class="err-text">${esc(d.error)}</div>`;
+    if (!d.results?.length) return `<div class="empty">No URLScan results found (total: ${d.total||0})</div>`;
+    let h = `<div class="dr"><span class="dl">Total Results</span><span class="dv">${d.total}</span></div><div class="sl">Recent Scans</div>`;
+    for (const r of d.results.slice(0,4)) {
+      const mal = r.malicious ? `<span class="tag t-r" style="margin-left:5px;">MALICIOUS</span>` : '';
+      h += `<div style="padding:5px 0;border-bottom:1px solid var(--border);">
+        <div style="font-size:10px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r.url||r.ip||'')}${mal}</div>
+        <div style="font-size:9.5px;color:var(--text3);">${r.country||''} ${r.server||''} ${r.ts?'· '+new Date(r.ts).toLocaleDateString():''}</div>
+      </div>`;
+    }
+    return h;
+  }
+
   // ── HISTORY ────────────────────────────────────────────────────────────────
   function openHistory() {
     el('history-overlay').style.display = 'block';
@@ -657,17 +706,20 @@
         div.innerHTML = `
           <div style="flex:1;min-width:0;">
             <div class="h-target">${esc(item.target)}</div>
-            <div class="h-ts">${esc(ts)}</div>
+            <div class="h-ts">${esc(ts)}${item.tags ? ' · <span style="color:var(--cyan);font-size:9px;">'+item.tags.split(',').map(t=>esc(t.trim())).join(' ')+'</span>' : ''}</div>
+            ${item.notes ? `<div style="font-size:9.5px;color:var(--text3);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(item.notes)}</div>` : ''}
           </div>
           <div class="h-counts">
             ${item.high?`<span class="fcnt fcnt-h" style="display:inline;">${item.high}H</span>`:''}
             ${item.medium?`<span class="fcnt fcnt-m" style="display:inline;">${item.medium}M</span>`:''}
             ${item.low?`<span class="fcnt fcnt-l" style="display:inline;">${item.low}L</span>`:''}
           </div>
-          <button class="h-share" data-id="${esc(item.id)}" title="Share report">⬡</button>
+          <button class="h-share" data-id="${esc(item.id)}" title="Copy share link">⬡</button>
+          <button class="h-note" data-id="${esc(item.id)}" title="Add note" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:11px;flex-shrink:0;">✎</button>
+          <button class="h-rescan" data-target="${esc(item.target)}" title="Re-scan" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:11px;flex-shrink:0;">↺</button>
           <button class="h-del" data-id="${esc(item.id)}" title="Delete">×</button>`;
         div.addEventListener('click', (e) => {
-          if (e.target.classList.contains('h-del')) return;
+          if (e.target.classList.contains('h-del') || e.target.classList.contains('h-note') || e.target.classList.contains('h-rescan') || e.target.classList.contains('h-share')) return;
           loadHistoryScan(item.id);
         });
         div.querySelector('.h-share').addEventListener('click', async (e) => {
@@ -683,6 +735,21 @@
               setTimeout(() => { t.style.display = 'none'; }, 5000);
             }
           } catch {}
+        });
+        div.querySelector('.h-note').addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const current = item.notes || '';
+          const note = prompt('Add/edit note for this scan:', current);
+          if (note === null) return;
+          await fetch(`/api/history/${item.id}/note`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ note }) });
+          item.notes = note;
+          loadHistoryList();
+        });
+        div.querySelector('.h-rescan').addEventListener('click', (e) => {
+          e.stopPropagation();
+          el('target-input').value = item.target;
+          closeHistory();
+          el('scan-btn').click();
         });
         div.querySelector('.h-del').addEventListener('click', async (e) => {
           e.stopPropagation();
@@ -711,6 +778,7 @@
         headers: renderHeaders, waf: renderWAF, breaches: renderBreaches,
         emailSecurity: renderEmailSecurity, reverseDNS: renderReverseDNS,
         httpPreview: renderHTTPPreview, abuseipdb: renderAbuseIPDB, shodan: renderShodan,
+        virustotal: renderVirusTotal, urlscan: renderURLScan,
       };
       for (const [mod, fn] of Object.entries(renderMap)) {
         if (res[mod] !== undefined) { setModState(mod, res[mod].error ? 'error' : 'done'); setBadge(mod, res[mod].error ? 'error' : 'done', res[mod].error ? 'ERROR' : 'DONE'); setC(mod, fn(res[mod])); }
@@ -749,7 +817,7 @@
   }
 
   // ── SCAN ───────────────────────────────────────────────────────────────────
-  const ALL_MODULES = ['dns','ports','ssl','whois','subdomains','geoip','tech','headers','waf','breaches','emailSecurity','reverseDNS','httpPreview','abuseipdb','shodan'];
+  const ALL_MODULES = ['dns','ports','ssl','whois','subdomains','geoip','tech','headers','waf','breaches','emailSecurity','reverseDNS','httpPreview','abuseipdb','shodan','virustotal','urlscan'];
   let scanning = false, es = null;
 
   function resetUI() {
@@ -784,6 +852,7 @@
       headers: renderHeaders, waf: renderWAF, breaches: renderBreaches,
       emailSecurity: renderEmailSecurity, reverseDNS: renderReverseDNS,
       httpPreview: renderHTTPPreview, abuseipdb: renderAbuseIPDB, shodan: renderShodan,
+      virustotal: renderVirusTotal, urlscan: renderURLScan,
     };
 
     for (const [mod, fn] of Object.entries(renderMap)) {
@@ -981,35 +1050,69 @@
   el('ob-skip').addEventListener('click', completeOnboarding);
 
   // ── SETTINGS MODAL ────────────────────────────────────────────────────────
+  async function loadTokenList() {
+    const list = el('token-list');
+    try {
+      const tokens = await fetch('/api/tokens').then(r=>r.json());
+      if (!tokens.length) { list.textContent = 'No API tokens yet.'; return; }
+      list.innerHTML = tokens.map(t => `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);">
+        <span style="flex:1;color:var(--text);">${esc(t.name)}</span>
+        <span style="color:var(--text3);font-size:9px;">${new Date(t.createdAt).toLocaleDateString()}</span>
+        <button onclick="revokeToken('${esc(t.id)}')" style="background:none;border:1px solid var(--red);color:var(--red);cursor:pointer;font-size:9px;padding:1px 6px;font-family:inherit;">Revoke</button>
+      </div>`).join('');
+    } catch { list.textContent = 'Failed to load tokens.'; }
+  }
+  async function revokeToken(id) {
+    if (!confirm('Revoke this API token?')) return;
+    await fetch(`/api/tokens/${id}`, { method: 'DELETE' });
+    loadTokenList();
+  }
+  el('token-create').addEventListener('click', async () => {
+    const name = el('token-name').value.trim();
+    if (!name) return;
+    try {
+      const r = await fetch('/api/tokens', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name}) });
+      const d = await r.json();
+      if (d.rawToken) {
+        el('token-new').style.display = 'block';
+        el('token-new').innerHTML = `<strong>Copy now — shown once:</strong><br>${esc(d.rawToken)}`;
+        el('token-name').value = '';
+        loadTokenList();
+        setTimeout(() => { el('token-new').style.display = 'none'; }, 30000);
+      }
+    } catch {}
+  });
+
   el('settings-btn').addEventListener('click', async () => {
     el('settings-overlay').style.display = 'block';
     el('settings-modal').style.display = 'block';
     el('settings-msg').textContent = '';
     el('set-hibp').value = ''; el('set-abuse').value = ''; el('set-shodan').value = '';
+    el('set-vt').value = ''; el('set-urlscan').value = '';
+    el('token-new').style.display = 'none';
+    loadTokenList();
     try {
       const r = await fetch('/api/settings'); const cfg = await r.json();
-      el('hibp-status').textContent = cfg.hibpConfigured ? '✓ configured' : '✗ not set';
-      el('hibp-status').style.color = cfg.hibpConfigured ? 'var(--green)' : 'var(--red)';
-      el('abuse-status').textContent = cfg.abuseConfigured ? '✓ configured' : '✗ not set';
-      el('abuse-status').style.color = cfg.abuseConfigured ? 'var(--green)' : 'var(--red)';
-      el('shodan-status').textContent = cfg.shodanConfigured ? '✓ configured' : '✗ not set';
-      el('shodan-status').style.color = cfg.shodanConfigured ? 'var(--green)' : 'var(--red)';
+      const stat = (id, ok) => { el(id).textContent = ok ? '✓ configured' : '✗ not set'; el(id).style.color = ok ? 'var(--green)' : 'var(--red)'; };
+      stat('hibp-status', cfg.hibpConfigured);
+      stat('abuse-status', cfg.abuseConfigured);
+      stat('shodan-status', cfg.shodanConfigured);
+      stat('vt-status', cfg.vtConfigured);
+      stat('urlscan-status', cfg.urlscanConfigured);
     } catch {}
   });
   el('settings-close').addEventListener('click', () => { el('settings-overlay').style.display='none'; el('settings-modal').style.display='none'; });
   el('settings-overlay').addEventListener('click', () => { el('settings-overlay').style.display='none'; el('settings-modal').style.display='none'; });
   el('settings-save').addEventListener('click', async () => {
     const body = {};
-    const hibp = el('set-hibp').value.trim(); const abuse = el('set-abuse').value.trim(); const shodan = el('set-shodan').value.trim();
-    if (hibp) body.HIBP_API_KEY = hibp;
-    if (abuse) body.ABUSEIPDB_API_KEY = abuse;
-    if (shodan) body.SHODAN_API_KEY = shodan;
+    const pairs = [['set-hibp','HIBP_API_KEY'],['set-abuse','ABUSEIPDB_API_KEY'],['set-shodan','SHODAN_API_KEY'],['set-vt','VIRUSTOTAL_API_KEY'],['set-urlscan','URLSCAN_API_KEY']];
+    for (const [eid, k] of pairs) { const v = el(eid).value.trim(); if (v) body[k] = v; }
     if (!Object.keys(body).length) { el('settings-msg').textContent = 'No changes to save.'; el('settings-msg').style.color='var(--text3)'; return; }
     try {
       await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
       el('settings-msg').textContent = '✓ Saved successfully';
       el('settings-msg').style.color = 'var(--green)';
-      el('set-hibp').value=''; el('set-abuse').value=''; el('set-shodan').value='';
+      pairs.forEach(([eid]) => { el(eid).value = ''; });
     } catch { el('settings-msg').textContent = 'Error saving keys'; el('settings-msg').style.color='var(--red)'; }
   });
 

@@ -59,7 +59,18 @@ async function initDB() {
   )`);
   await pool.query(`ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS user_id TEXT`);
   await pool.query(`ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS share_token TEXT`);
+  await pool.query(`ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS notes TEXT`);
+  await pool.query(`ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS tags TEXT`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS banned BOOLEAN DEFAULT FALSE`);
   await pool.query(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS api_tokens (
+    id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL,
+    token_hash TEXT UNIQUE NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW(), last_used TIMESTAMPTZ
+  )`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS audit_log (
+    id TEXT PRIMARY KEY, admin_id TEXT, admin_name TEXT, action TEXT NOT NULL,
+    target_id TEXT, target_name TEXT, details TEXT, ts TIMESTAMPTZ DEFAULT NOW()
+  )`);
   const { rows } = await pool.query('SELECT key, value FROM settings');
   for (const { key, value } of rows) { if (value) process.env[key] = value; }
 }
@@ -125,7 +136,7 @@ async function dbGetAllUsers() {
     return fileLoadUsers().map(u => ({ id: u.id, username: u.username, createdAt: u.createdAt, isAdmin: u.isAdmin || false, onboarded: u.onboarded }));
   }
   const { rows } = await pool.query(
-    `SELECT id, username, created_at AS "createdAt", is_admin AS "isAdmin", onboarded FROM users ORDER BY created_at`);
+    `SELECT id, username, created_at AS "createdAt", is_admin AS "isAdmin", onboarded, banned FROM users ORDER BY created_at`);
   return rows;
 }
 
@@ -189,14 +200,14 @@ async function dbGetHistory(userId, isAdmin) {
       const items = await Promise.allSettled(files.map(async f => {
         const d = JSON.parse(await fs.readFile(path.join(HISTORY_DIR, f), 'utf8'));
         if (!isAdmin && d.userId && d.userId !== userId) return null;
-        return { id: d.id, ts: d.ts, target: d.target, total: d.total, high: d.high, medium: d.medium, low: d.low, info: d.info, userId: d.userId };
+        return { id: d.id, ts: d.ts, target: d.target, total: d.total, high: d.high, medium: d.medium, low: d.low, info: d.info, userId: d.userId, notes: d.notes || null, tags: d.tags || null };
       }));
       return items.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
     } catch { return []; }
   }
   const q = isAdmin
-    ? `SELECT id,ts,user_id AS "userId",target,total_findings AS total,high_count AS high,medium_count AS medium,low_count AS low,info_count AS info FROM scan_history ORDER BY ts DESC LIMIT 100`
-    : `SELECT id,ts,user_id AS "userId",target,total_findings AS total,high_count AS high,medium_count AS medium,low_count AS low,info_count AS info FROM scan_history WHERE user_id=$1 OR user_id IS NULL ORDER BY ts DESC LIMIT 100`;
+    ? `SELECT id,ts,user_id AS "userId",target,total_findings AS total,high_count AS high,medium_count AS medium,low_count AS low,info_count AS info,notes,tags FROM scan_history ORDER BY ts DESC LIMIT 100`
+    : `SELECT id,ts,user_id AS "userId",target,total_findings AS total,high_count AS high,medium_count AS medium,low_count AS low,info_count AS info,notes,tags FROM scan_history WHERE user_id=$1 OR user_id IS NULL ORDER BY ts DESC LIMIT 100`;
   const { rows } = await pool.query(q, isAdmin ? [] : [userId]);
   return rows;
 }
@@ -339,6 +350,139 @@ async function dbGetScansByDay() {
   return rows;
 }
 
+async function dbAddNote(id, userId, isAdmin, note) {
+  if (!pool) {
+    const safe = id.replace(/[^a-z0-9]/gi, '');
+    const fPath = path.join(HISTORY_DIR, `${safe}.json`);
+    const d = JSON.parse(await fs.readFile(fPath, 'utf8'));
+    if (!isAdmin && d.userId && d.userId !== userId) throw new Error('Not found');
+    d.notes = note; await fs.writeFile(fPath, JSON.stringify(d)); return;
+  }
+  const q = isAdmin
+    ? `UPDATE scan_history SET notes=$1 WHERE id=$2 RETURNING id`
+    : `UPDATE scan_history SET notes=$1 WHERE id=$2 AND (user_id=$3 OR user_id IS NULL) RETURNING id`;
+  const { rows } = await pool.query(q, isAdmin ? [note, id] : [note, id, userId]);
+  if (!rows.length) throw new Error('Not found');
+}
+
+async function dbAddTags(id, userId, isAdmin, tags) {
+  const tagStr = Array.isArray(tags) ? tags.join(',') : tags;
+  if (!pool) {
+    const safe = id.replace(/[^a-z0-9]/gi, '');
+    const fPath = path.join(HISTORY_DIR, `${safe}.json`);
+    const d = JSON.parse(await fs.readFile(fPath, 'utf8'));
+    if (!isAdmin && d.userId && d.userId !== userId) throw new Error('Not found');
+    d.tags = tagStr; await fs.writeFile(fPath, JSON.stringify(d)); return;
+  }
+  const q = isAdmin
+    ? `UPDATE scan_history SET tags=$1 WHERE id=$2 RETURNING id`
+    : `UPDATE scan_history SET tags=$1 WHERE id=$2 AND (user_id=$3 OR user_id IS NULL) RETURNING id`;
+  const { rows } = await pool.query(q, isAdmin ? [tagStr, id] : [tagStr, id, userId]);
+  if (!rows.length) throw new Error('Not found');
+}
+
+async function dbBanUser(userId, banned) {
+  if (!pool) {
+    const users = fileLoadUsers();
+    const u = users.find(u => u.id === userId); if (!u) return;
+    u.banned = banned; await fileSaveUsers(users); return;
+  }
+  await pool.query('UPDATE users SET banned=$1 WHERE id=$2', [banned, userId]);
+}
+
+// ─── API TOKENS ──────────────────────────────────────────────────────────────
+async function dbCreateApiToken(userId, name) {
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  const id = crypto.randomBytes(8).toString('hex');
+  if (!pool) {
+    let cfg = {}; try { cfg = JSON.parse(await fs.readFile(path.join(DATA_DIR, 'tokens.json'), 'utf8')); } catch {}
+    if (!cfg[userId]) cfg[userId] = [];
+    cfg[userId].push({ id, name, tokenHash, createdAt: new Date().toISOString() });
+    await fs.writeFile(path.join(DATA_DIR, 'tokens.json'), JSON.stringify(cfg));
+    return { id, rawToken };
+  }
+  await pool.query('INSERT INTO api_tokens (id, user_id, name, token_hash) VALUES ($1,$2,$3,$4)', [id, userId, name, tokenHash]);
+  return { id, rawToken };
+}
+
+async function dbGetApiTokens(userId) {
+  if (!pool) {
+    try {
+      const cfg = JSON.parse(await fs.readFile(path.join(DATA_DIR, 'tokens.json'), 'utf8'));
+      return (cfg[userId] || []).map(({ id, name, createdAt }) => ({ id, name, createdAt }));
+    } catch { return []; }
+  }
+  const { rows } = await pool.query(
+    `SELECT id, name, created_at AS "createdAt", last_used AS "lastUsed" FROM api_tokens WHERE user_id=$1 ORDER BY created_at DESC`, [userId]);
+  return rows;
+}
+
+async function dbRevokeApiToken(id, userId, isAdmin) {
+  if (!pool) {
+    let cfg = {}; try { cfg = JSON.parse(await fs.readFile(path.join(DATA_DIR, 'tokens.json'), 'utf8')); } catch {}
+    for (const uid of Object.keys(cfg)) {
+      if (!isAdmin && uid !== userId) continue;
+      const before = cfg[uid].length;
+      cfg[uid] = cfg[uid].filter(t => t.id !== id);
+      if (cfg[uid].length < before) { await fs.writeFile(path.join(DATA_DIR, 'tokens.json'), JSON.stringify(cfg)); return; }
+    }
+    throw new Error('Not found');
+  }
+  const q = isAdmin ? `DELETE FROM api_tokens WHERE id=$1` : `DELETE FROM api_tokens WHERE id=$1 AND user_id=$2`;
+  const { rowCount } = await pool.query(q, isAdmin ? [id] : [id, userId]);
+  if (!rowCount) throw new Error('Not found');
+}
+
+async function dbVerifyApiToken(rawToken) {
+  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  if (!pool) {
+    try {
+      const cfg = JSON.parse(await fs.readFile(path.join(DATA_DIR, 'tokens.json'), 'utf8'));
+      for (const [uid, tokens] of Object.entries(cfg)) {
+        const match = tokens.find(t => t.tokenHash === tokenHash);
+        if (match) return await dbFindUserById(uid);
+      }
+    } catch {} return null;
+  }
+  const { rows } = await pool.query('SELECT user_id FROM api_tokens WHERE token_hash=$1', [tokenHash]);
+  if (!rows[0]) return null;
+  await pool.query('UPDATE api_tokens SET last_used=NOW() WHERE token_hash=$1', [tokenHash]);
+  return await dbFindUserById(rows[0].user_id);
+}
+
+// ─── AUDIT LOG ───────────────────────────────────────────────────────────────
+async function dbAddAuditLog(adminId, adminName, action, targetId, targetName, details) {
+  const id = crypto.randomBytes(8).toString('hex');
+  if (!pool) return; // skip for file mode
+  await pool.query(
+    'INSERT INTO audit_log (id, admin_id, admin_name, action, target_id, target_name, details) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+    [id, adminId, adminName, action, targetId || null, targetName || null, details || null]).catch(() => {});
+}
+
+async function dbGetAuditLog(limit = 50) {
+  if (!pool) return [];
+  const { rows } = await pool.query(
+    `SELECT admin_name, action, target_name, details, ts FROM audit_log ORDER BY ts DESC LIMIT $1`, [limit]);
+  return rows;
+}
+
+async function dbGetTopTargets() {
+  if (!pool) {
+    const result = {};
+    try {
+      const files = (await fs.readdir(HISTORY_DIR)).filter(f => f.endsWith('.json'));
+      for (const f of files) {
+        try { const d = JSON.parse(await fs.readFile(path.join(HISTORY_DIR, f), 'utf8')); if (d.target) result[d.target] = (result[d.target]||0)+1; } catch {}
+      }
+    } catch {}
+    return Object.entries(result).sort((a,b)=>b[1]-a[1]).slice(0,10).map(([target,count])=>({target,count}));
+  }
+  const { rows } = await pool.query(
+    `SELECT target, COUNT(*)::int AS count FROM scan_history GROUP BY target ORDER BY count DESC LIMIT 10`);
+  return rows;
+}
+
 // ─── PASSWORD UTILS ───────────────────────────────────────────────────────────
 async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -415,9 +559,17 @@ function releaseScanSlot() {
 }
 
 // ─── AUTH MIDDLEWARE ─────────────────────────────────────────────────────────
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   req.user = getSession(req);
   if (req.user) return next();
+  const key = req.headers['x-api-key'];
+  if (key) {
+    const user = await dbVerifyApiToken(key).catch(() => null);
+    if (user) {
+      req.user = { userId: user.id, username: user.username, isAdmin: user.isAdmin || false };
+      return next();
+    }
+  }
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
   res.redirect('/login');
 }
@@ -542,12 +694,15 @@ app.post('/api/login', async (req, res) => {
   if (!user || !(await verifyPassword(password, user.passwordHash))) {
     return res.send(loginPage({ loginErr: 'Invalid username or password.' }));
   }
+  if (user.banned) return res.send(loginPage({ loginErr: 'Account suspended. Contact an administrator.' }));
   const token = createSession(user.id, user.username, user.isAdmin || false);
   res.setHeader('Set-Cookie', `to_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`);
   res.redirect('/');
 });
 
 app.post('/api/register', async (req, res) => {
+  const regDisabled = await dbGetSetting('REGISTRATION_DISABLED').catch(() => null);
+  if (regDisabled === 'true') return res.send(loginPage({ tab: 'register', registerErr: 'Registration is currently disabled.' }));
   const { username, password, confirm } = req.body;
   if (!username || !password || !confirm)
     return res.send(loginPage({ tab: 'register', registerErr: 'All fields required.' }));
@@ -588,17 +743,16 @@ app.post('/api/onboarding/complete', requireAuth, async (req, res) => {
 // ─── SETTINGS ────────────────────────────────────────────────────────────────
 app.get('/api/settings', requireAuth, (req, res) => {
   res.json({
-    HIBP_API_KEY: process.env.HIBP_API_KEY ? '••••••••' : '',
-    ABUSEIPDB_API_KEY: process.env.ABUSEIPDB_API_KEY ? '••••••••' : '',
-    SHODAN_API_KEY: process.env.SHODAN_API_KEY ? '••••••••' : '',
     hibpConfigured: !!(process.env.HIBP_API_KEY && process.env.HIBP_API_KEY !== 'your_hibp_key_here'),
     abuseConfigured: !!(process.env.ABUSEIPDB_API_KEY && process.env.ABUSEIPDB_API_KEY !== 'your_abuseipdb_key_here'),
     shodanConfigured: !!(process.env.SHODAN_API_KEY && process.env.SHODAN_API_KEY !== 'your_shodan_key_here'),
+    vtConfigured: !!(process.env.VIRUSTOTAL_API_KEY && process.env.VIRUSTOTAL_API_KEY !== 'your_virustotal_key_here'),
+    urlscanConfigured: !!(process.env.URLSCAN_API_KEY && process.env.URLSCAN_API_KEY !== 'your_urlscan_key_here'),
   });
 });
 
 app.post('/api/settings', requireAuth, async (req, res) => {
-  const allowed = ['HIBP_API_KEY', 'ABUSEIPDB_API_KEY', 'SHODAN_API_KEY'];
+  const allowed = ['HIBP_API_KEY', 'ABUSEIPDB_API_KEY', 'SHODAN_API_KEY', 'VIRUSTOTAL_API_KEY', 'URLSCAN_API_KEY'];
   const updates = {};
   for (const key of allowed) {
     if (req.body[key] !== undefined && req.body[key] !== '••••••••' && req.body[key] !== '') {
@@ -625,7 +779,8 @@ app.get('/api/admin/users', requireAdmin, async (req, res) => {
 app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
   const { id } = req.params;
   if (id === req.user.userId) return res.status(400).json({ error: 'Cannot delete yourself' });
-  try { await dbDeleteUser(id); res.json({ ok: true }); }
+  const target = await dbFindUserById(id).catch(() => null);
+  try { await dbDeleteUser(id); audit(req, 'delete_user', id, target?.username, null); res.json({ ok: true }); }
   catch (e) { res.status(404).json({ error: e.message }); }
 });
 
@@ -635,6 +790,7 @@ app.post('/api/admin/users/:id/promote', requireAdmin, async (req, res) => {
   const user = await dbFindUserById(id).catch(() => null);
   if (!user) return res.status(404).json({ error: 'User not found' });
   await dbSetUserAdmin(id, !user.isAdmin);
+  audit(req, user.isAdmin ? 'demote_user' : 'promote_user', id, user.username, null);
   res.json({ ok: true, isAdmin: !user.isAdmin });
 });
 
@@ -644,6 +800,7 @@ app.post('/api/admin/users/:id/reset-password', requireAdmin, async (req, res) =
   const user = await dbFindUserById(req.params.id).catch(() => null);
   if (!user) return res.status(404).json({ error: 'User not found' });
   await dbResetPassword(req.params.id, await hashPassword(password));
+  audit(req, 'reset_password', user.id, user.username, null);
   res.json({ ok: true });
 });
 
@@ -651,6 +808,7 @@ app.get('/api/admin/users/:id/impersonate', requireAdmin, async (req, res) => {
   const user = await dbFindUserById(req.params.id).catch(() => null);
   if (!user) return res.status(404).send('User not found');
   if (user.isAdmin) return res.status(400).send('Cannot impersonate another admin');
+  audit(req, 'impersonate', user.id, user.username, null);
   const token = createSession(user.id, user.username, false);
   res.setHeader('Set-Cookie', `to_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`);
   res.redirect('/');
@@ -706,11 +864,13 @@ app.get('/api/admin/api-keys', requireAdmin, (req, res) => {
     hibpConfigured: !!(process.env.HIBP_API_KEY && process.env.HIBP_API_KEY !== 'your_hibp_key_here'),
     abuseConfigured: !!(process.env.ABUSEIPDB_API_KEY && process.env.ABUSEIPDB_API_KEY !== 'your_abuseipdb_key_here'),
     shodanConfigured: !!(process.env.SHODAN_API_KEY && process.env.SHODAN_API_KEY !== 'your_shodan_key_here'),
+    vtConfigured: !!(process.env.VIRUSTOTAL_API_KEY && process.env.VIRUSTOTAL_API_KEY !== 'your_virustotal_key_here'),
+    urlscanConfigured: !!(process.env.URLSCAN_API_KEY && process.env.URLSCAN_API_KEY !== 'your_urlscan_key_here'),
   });
 });
 
 app.post('/api/admin/api-keys', requireAdmin, async (req, res) => {
-  const allowed = ['HIBP_API_KEY', 'ABUSEIPDB_API_KEY', 'SHODAN_API_KEY'];
+  const allowed = ['HIBP_API_KEY', 'ABUSEIPDB_API_KEY', 'SHODAN_API_KEY', 'VIRUSTOTAL_API_KEY', 'URLSCAN_API_KEY'];
   const updates = {};
   for (const key of allowed) {
     if (req.body[key] !== undefined && req.body[key] !== '') { updates[key] = req.body[key]; process.env[key] = req.body[key]; }
@@ -719,6 +879,80 @@ app.post('/api/admin/api-keys', requireAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ─── ADMIN AUDIT HELPER ───────────────────────────────────────────────────────
+function audit(req, action, targetId, targetName, details) {
+  dbAddAuditLog(req.user.userId, req.user.username, action, targetId, targetName, details).catch(() => {});
+}
+
+// ─── MORE ADMIN ROUTES ────────────────────────────────────────────────────────
+app.get('/api/admin/health', requireAdmin, (req, res) => {
+  const mem = process.memoryUsage();
+  res.json({
+    uptime: Math.round(process.uptime()),
+    nodeVersion: process.version,
+    memUsedMB: Math.round(mem.heapUsed / 1024 / 1024),
+    memTotalMB: Math.round(mem.heapTotal / 1024 / 1024),
+    activeSessions: sessions.size,
+    activeScans,
+    scanQueue: scanQueue.length,
+    dbMode: pool ? 'postgres' : 'file',
+  });
+});
+
+app.get('/api/admin/sessions', requireAdmin, (req, res) => {
+  const now = Date.now();
+  const list = [];
+  for (const [token, s] of sessions) {
+    if (now > s.expiry) continue;
+    list.push({ tokenPrefix: token.slice(0, 8) + '...', userId: s.userId, username: s.username, isAdmin: s.isAdmin, expiresIn: Math.round((s.expiry - now) / 60000) });
+  }
+  res.json(list);
+});
+
+app.delete('/api/admin/sessions/:prefix', requireAdmin, (req, res) => {
+  const prefix = req.params.prefix;
+  let count = 0;
+  for (const [token, s] of sessions) {
+    if (token.startsWith(prefix)) { sessions.delete(token); count++; }
+  }
+  if (count) { audit(req, 'kill_session', null, prefix, null); res.json({ ok: true }); }
+  else res.status(404).json({ error: 'Session not found' });
+});
+
+app.post('/api/admin/users/:id/ban', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  if (id === req.user.userId) return res.status(400).json({ error: 'Cannot ban yourself' });
+  const user = await dbFindUserById(id).catch(() => null);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const newBanned = !user.banned;
+  await dbBanUser(id, newBanned);
+  audit(req, newBanned ? 'ban_user' : 'unban_user', id, user.username, null);
+  res.json({ ok: true, banned: newBanned });
+});
+
+app.get('/api/admin/registration', requireAdmin, async (req, res) => {
+  const val = await dbGetSetting('REGISTRATION_DISABLED').catch(() => null);
+  res.json({ disabled: val === 'true' });
+});
+
+app.post('/api/admin/registration', requireAdmin, async (req, res) => {
+  const { disabled } = req.body;
+  if (disabled) { await dbSetSetting('REGISTRATION_DISABLED', 'true'); }
+  else { await dbDeleteSetting('REGISTRATION_DISABLED'); }
+  audit(req, disabled ? 'disable_registration' : 'enable_registration', null, null, null);
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/audit', requireAdmin, async (req, res) => {
+  try { res.json(await dbGetAuditLog(100)); } catch { res.json([]); }
+});
+
+app.get('/api/admin/top-targets', requireAdmin, async (req, res) => {
+  try { res.json(await dbGetTopTargets()); } catch { res.json([]); }
+});
+
+// Add audit logs to existing admin actions
+// (patch promote/delete/etc routes to log)
 // ─── ANNOUNCEMENT FOR DASHBOARD ───────────────────────────────────────────────
 app.get('/api/announcement', requireAuth, async (req, res) => {
   const msg = await dbGetSetting('ANNOUNCEMENT').catch(() => null);
@@ -731,6 +965,42 @@ app.post('/api/history/:id/share', requireAuth, async (req, res) => {
     const token = await dbGenerateShareToken(req.params.id, req.user.userId, req.user.isAdmin);
     const url = `${req.protocol}://${req.get('host')}/report/${token}`;
     res.json({ token, url });
+  } catch (e) { res.status(404).json({ error: e.message }); }
+});
+
+// ─── NOTES & TAGS ────────────────────────────────────────────────────────────
+app.put('/api/history/:id/note', requireAuth, async (req, res) => {
+  try {
+    await dbAddNote(req.params.id.replace(/[^a-z0-9]/gi, ''), req.user.userId, req.user.isAdmin, req.body.note || null);
+    res.json({ ok: true });
+  } catch (e) { res.status(404).json({ error: e.message }); }
+});
+
+app.put('/api/history/:id/tags', requireAuth, async (req, res) => {
+  try {
+    await dbAddTags(req.params.id.replace(/[^a-z0-9]/gi, ''), req.user.userId, req.user.isAdmin, req.body.tags || []);
+    res.json({ ok: true });
+  } catch (e) { res.status(404).json({ error: e.message }); }
+});
+
+// ─── API TOKENS ───────────────────────────────────────────────────────────────
+app.get('/api/tokens', requireAuth, async (req, res) => {
+  try { res.json(await dbGetApiTokens(req.user.userId)); } catch { res.json([]); }
+});
+
+app.post('/api/tokens', requireAuth, async (req, res) => {
+  const { name } = req.body;
+  if (!name || name.length > 50) return res.status(400).json({ error: 'Name required (max 50 chars)' });
+  try {
+    const { id, rawToken } = await dbCreateApiToken(req.user.userId, name.trim());
+    res.json({ id, rawToken, name: name.trim() });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/tokens/:id', requireAuth, async (req, res) => {
+  try {
+    await dbRevokeApiToken(req.params.id, req.user.userId, req.user.isAdmin);
+    res.json({ ok: true });
   } catch (e) { res.status(404).json({ error: e.message }); }
 });
 
@@ -885,6 +1155,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
   <div class="tab active" onclick="switchTab('overview')">Overview</div>
   <div class="tab" onclick="switchTab('users')">Users</div>
   <div class="tab" onclick="switchTab('scans')">Scans</div>
+  <div class="tab" onclick="switchTab('sessions')">Sessions</div>
   <div class="tab" onclick="switchTab('settings')">Settings</div>
 </div>
 
@@ -894,10 +1165,21 @@ tr:hover td{background:rgba(255,255,255,.02);}
     <div class="stat"><div class="stat-n" id="st-users">—</div><div class="stat-l">Total Users</div></div>
     <div class="stat"><div class="stat-n" id="st-scans">—</div><div class="stat-l">Total Scans</div></div>
     <div class="stat"><div class="stat-n" id="st-today">—</div><div class="stat-l">Scans Today</div></div>
+    <div class="stat"><div class="stat-n" id="st-sessions">—</div><div class="stat-l">Active Sessions</div></div>
+    <div class="stat"><div class="stat-n" id="st-uptime">—</div><div class="stat-l">Uptime (min)</div></div>
+    <div class="stat"><div class="stat-n" id="st-mem">—</div><div class="stat-l">Memory (MB)</div></div>
   </div>
-  <div class="section">
-    <div class="sec-hdr">Scans per Day (last 14 days)</div>
-    <div class="chart-wrap"><svg id="chart" height="80" style="min-width:100%;"></svg></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;">
+    <div class="section" style="margin-bottom:0;">
+      <div class="sec-hdr">Scans per Day (last 14 days)</div>
+      <div class="chart-wrap"><svg id="chart" height="80" style="min-width:100%;"></svg></div>
+    </div>
+    <div class="section" style="margin-bottom:0;">
+      <div class="sec-hdr">Top Targets</div>
+      <table><thead><tr><th>Target</th><th>Scans</th></tr></thead>
+        <tbody id="top-tbody"><tr><td colspan="2" style="color:#444458;">Loading...</td></tr></tbody>
+      </table>
+    </div>
   </div>
   <div class="section">
     <div class="sec-hdr">Announcement Banner
@@ -908,15 +1190,33 @@ tr:hover td{background:rgba(255,255,255,.02);}
       <button class="btn btn-g" onclick="saveAnnouncement()">Save</button>
     </div>
   </div>
-  <div class="section">
-    <div class="sec-hdr">Maintenance Mode</div>
-    <div class="toggle-wrap">
-      <label class="toggle"><input type="checkbox" id="maint-toggle" onchange="toggleMaintenance()"><span class="toggle-slider"></span></label>
-      <div>
-        <div style="font-size:11px;color:#e0e0e8;font-weight:600;">Lock out non-admin users</div>
-        <div style="font-size:9.5px;color:#444458;margin-top:2px;">Users will see a maintenance page until this is turned off</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;">
+    <div class="section" style="margin-bottom:0;">
+      <div class="sec-hdr">Maintenance Mode</div>
+      <div class="toggle-wrap">
+        <label class="toggle"><input type="checkbox" id="maint-toggle" onchange="toggleMaintenance()"><span class="toggle-slider"></span></label>
+        <div>
+          <div style="font-size:11px;color:#e0e0e8;font-weight:600;">Lock out non-admin users</div>
+          <div style="font-size:9.5px;color:#444458;margin-top:2px;">Shows maintenance page to all non-admins</div>
+        </div>
       </div>
     </div>
+    <div class="section" style="margin-bottom:0;">
+      <div class="sec-hdr">Registration</div>
+      <div class="toggle-wrap">
+        <label class="toggle"><input type="checkbox" id="reg-toggle" onchange="toggleRegistration()"><span class="toggle-slider"></span></label>
+        <div>
+          <div style="font-size:11px;color:#e0e0e8;font-weight:600;">Disable new registrations</div>
+          <div style="font-size:9.5px;color:#444458;margin-top:2px;">Existing users can still log in</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="sec-hdr">Recent Audit Log</div>
+    <table><thead><tr><th>Admin</th><th>Action</th><th>Target</th><th>Time</th></tr></thead>
+      <tbody id="audit-tbody"><tr><td colspan="4" style="color:#444458;">Loading...</td></tr></tbody>
+    </table>
   </div>
 </div>
 
@@ -925,8 +1225,8 @@ tr:hover td{background:rgba(255,255,255,.02);}
   <div class="section">
     <div class="sec-hdr">All Users</div>
     <table>
-      <thead><tr><th>Username</th><th>Joined</th><th>Role</th><th>Actions</th></tr></thead>
-      <tbody id="users-tbody"><tr><td colspan="4" style="color:#444458;">Loading...</td></tr></tbody>
+      <thead><tr><th>Username</th><th>Joined</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody id="users-tbody"><tr><td colspan="5" style="color:#444458;">Loading...</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -942,14 +1242,27 @@ tr:hover td{background:rgba(255,255,255,.02);}
   </div>
 </div>
 
+<!-- SESSIONS TAB -->
+<div class="tab-pane" id="tab-sessions">
+  <div class="section">
+    <div class="sec-hdr">Active Sessions <button class="btn" style="margin-left:auto;" onclick="loadSessions()">Refresh</button></div>
+    <table>
+      <thead><tr><th>User</th><th>Role</th><th>Expires In</th><th>Token</th><th></th></tr></thead>
+      <tbody id="sessions-tbody"><tr><td colspan="5" style="color:#444458;">Loading...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
 <!-- SETTINGS TAB -->
 <div class="tab-pane" id="tab-settings">
   <div class="section">
     <div class="sec-hdr">API Keys</div>
     <div id="key-rows" style="padding:0;">
-      <div class="key-row"><span style="flex:1;color:#8888a0;font-size:10px;">HIBP (Breach Check)</span><span id="hibp-st" class="tag" style="margin-right:10px;"></span><input type="password" class="inp" id="key-hibp" placeholder="Paste to update..." style="width:240px;"></div>
-      <div class="key-row"><span style="flex:1;color:#8888a0;font-size:10px;">AbuseIPDB (IP Reputation)</span><span id="abuse-st" class="tag" style="margin-right:10px;"></span><input type="password" class="inp" id="key-abuse" placeholder="Paste to update..." style="width:240px;"></div>
-      <div class="key-row"><span style="flex:1;color:#8888a0;font-size:10px;">Shodan (CVEs + Banners)</span><span id="shodan-st" class="tag" style="margin-right:10px;"></span><input type="password" class="inp" id="key-shodan" placeholder="Paste to update..." style="width:240px;"></div>
+      <div class="key-row"><span style="flex:1;color:#8888a0;font-size:10px;">HIBP (Breach Check)</span><span id="hibp-st" class="tag" style="margin-right:10px;"></span><input type="password" class="inp" id="key-hibp" placeholder="Paste to update..." style="width:220px;"></div>
+      <div class="key-row"><span style="flex:1;color:#8888a0;font-size:10px;">AbuseIPDB (IP Reputation)</span><span id="abuse-st" class="tag" style="margin-right:10px;"></span><input type="password" class="inp" id="key-abuse" placeholder="Paste to update..." style="width:220px;"></div>
+      <div class="key-row"><span style="flex:1;color:#8888a0;font-size:10px;">Shodan (CVEs + Banners)</span><span id="shodan-st" class="tag" style="margin-right:10px;"></span><input type="password" class="inp" id="key-shodan" placeholder="Paste to update..." style="width:220px;"></div>
+      <div class="key-row"><span style="flex:1;color:#8888a0;font-size:10px;">VirusTotal (Malware/Rep)</span><span id="vt-st" class="tag" style="margin-right:10px;"></span><input type="password" class="inp" id="key-vt" placeholder="Paste to update..." style="width:220px;"></div>
+      <div class="key-row"><span style="flex:1;color:#8888a0;font-size:10px;">URLScan.io (History search)</span><span id="urlscan-st" class="tag" style="margin-right:10px;"></span><input type="password" class="inp" id="key-urlscan" placeholder="Optional — for private scans" style="width:220px;"></div>
     </div>
     <div style="padding:12px 14px;border-top:1px solid #1a1a24;display:flex;gap:8px;justify-content:flex-end;">
       <span id="keys-msg" style="flex:1;color:#00e676;font-size:10px;padding-top:5px;"></span>
@@ -968,30 +1281,49 @@ function toast(msg, err) {
   t.style.display = 'block'; setTimeout(() => t.style.display='none', 3500);
 }
 
+const TABS = ['overview','users','scans','sessions','settings'];
 function switchTab(name) {
-  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', ['overview','users','scans','settings'][i]===name));
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', TABS[i]===name));
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id==='tab-'+name));
   if (name==='users' && !window._usersLoaded) loadUsers();
   if (name==='scans' && !window._scansLoaded) loadScans();
+  if (name==='sessions') loadSessions();
   if (name==='settings') loadKeys();
 }
 
 // ── OVERVIEW ────────────────────────────────────────────────────────────────
 async function loadOverview() {
-  const [stats, chart, ann, maint] = await Promise.all([
+  const [stats, chart, ann, maint, health, reg, top, auditData] = await Promise.all([
     fetch('/api/admin/stats').then(r=>r.json()),
     fetch('/api/admin/chart').then(r=>r.json()),
     fetch('/api/admin/announcement').then(r=>r.json()),
     fetch('/api/admin/maintenance').then(r=>r.json()),
+    fetch('/api/admin/health').then(r=>r.json()),
+    fetch('/api/admin/registration').then(r=>r.json()),
+    fetch('/api/admin/top-targets').then(r=>r.json()),
+    fetch('/api/admin/audit').then(r=>r.json()),
   ]);
   document.getElementById('st-users').textContent = stats.userCount;
   document.getElementById('st-scans').textContent = stats.scanCount;
   const today = new Date().toISOString().slice(0,10);
   const todayEntry = chart.find(d => d.day === today);
   document.getElementById('st-today').textContent = todayEntry ? todayEntry.count : 0;
+  document.getElementById('st-sessions').textContent = health.activeSessions || 0;
+  document.getElementById('st-uptime').textContent = Math.round((health.uptime||0)/60);
+  document.getElementById('st-mem').textContent = (health.memUsedMB||0)+'/'+(health.memTotalMB||0);
   renderChart(chart);
+  const tb = document.getElementById('top-tbody');
+  tb.innerHTML = top.length ? top.map(t => \`<tr><td style="color:#e0e0e8;">\${esc(t.target)}</td><td style="color:#ff2a2a;font-weight:700;">\${t.count}</td></tr>\`).join('') : '<tr><td colspan="2" style="color:#444458;">No data</td></tr>';
   if (ann.message) document.getElementById('announce-input').value = ann.message;
   document.getElementById('maint-toggle').checked = maint.enabled;
+  document.getElementById('reg-toggle').checked = reg.disabled;
+  const ab = document.getElementById('audit-tbody');
+  ab.innerHTML = auditData.length ? auditData.slice(0,20).map(a => \`<tr>
+    <td style="color:#00c8ff;font-size:10px;">\${esc(a.admin_name||'—')}</td>
+    <td style="color:#e0e0e8;">\${esc(a.action)}</td>
+    <td style="color:#8888a0;font-size:10px;">\${esc(a.target_name||'—')}</td>
+    <td style="color:#444458;font-size:9.5px;">\${new Date(a.ts).toLocaleString()}</td>
+  </tr>\`).join('') : '<tr><td colspan="4" style="color:#444458;">No audit events yet</td></tr>';
 }
 
 function renderChart(data) {
@@ -1027,29 +1359,45 @@ async function toggleMaintenance() {
   else { toast('Error', true); document.getElementById('maint-toggle').checked = !enabled; }
 }
 
+async function toggleRegistration() {
+  const disabled = document.getElementById('reg-toggle').checked;
+  const r = await fetch('/api/admin/registration', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({disabled}) });
+  if (r.ok) toast(disabled ? 'Registration disabled' : 'Registration enabled', disabled);
+  else { toast('Error', true); document.getElementById('reg-toggle').checked = !disabled; }
+}
+
 // ── USERS ────────────────────────────────────────────────────────────────────
 async function loadUsers() {
   window._usersLoaded = true;
   const users = await fetch('/api/admin/users').then(r=>r.json());
   const tb = document.getElementById('users-tbody');
   tb.innerHTML = users.length ? users.map(u => \`<tr>
-    <td style="font-weight:600;color:#e0e0e8;">\${esc(u.username)}</td>
+    <td style="font-weight:600;color:\${u.banned?'#444458':'#e0e0e8'};">\${esc(u.username)}</td>
     <td style="color:#8888a0;font-size:10px;">\${new Date(u.createdAt).toLocaleDateString()}</td>
     <td>\${u.isAdmin ? '<span class="tag t-r">ADMIN</span>' : '<span class="tag t-c">USER</span>'}</td>
+    <td>\${u.banned ? '<span class="tag t-r">BANNED</span>' : '<span class="tag t-g">ACTIVE</span>'}</td>
     <td><div class="act-btns">
       \${!u.isAdmin ? \`<a href="/api/admin/users/\${u.id}/impersonate" class="ab ab-p" target="_blank">Impersonate</a>\` : ''}
       <button class="ab ab-y" onclick="promptResetPw('\${u.id}','\${esc(u.username)}')">Reset PW</button>
       <button class="ab ab-c" onclick="toggleAdmin('\${u.id}','\${esc(u.username)}',\${u.isAdmin})">\${u.isAdmin?'Demote':'Promote'}</button>
+      \${!u.isAdmin ? \`<button class="ab \${u.banned?'ab-g':'ab-r'}" onclick="banUser('\${u.id}','\${esc(u.username)}',\${!!u.banned})">\${u.banned?'Unban':'Ban'}</button>\` : ''}
       <button class="ab ab-y" onclick="wipeHistory('\${u.id}','\${esc(u.username)}')">Wipe Scans</button>
       \${!u.isAdmin ? \`<button class="ab ab-r" onclick="deleteUser('\${u.id}','\${esc(u.username)}')">Delete</button>\` : ''}
     </div></td>
-  </tr>\`).join('') : '<tr><td colspan="4" style="color:#444458;">No users</td></tr>';
+  </tr>\`).join('') : '<tr><td colspan="5" style="color:#444458;">No users</td></tr>';
 }
 
 async function toggleAdmin(id, username, isAdmin) {
   if (!confirm(\`\${isAdmin?'Remove admin from':'Make admin'}: \${username}?\`)) return;
   const r = await fetch(\`/api/admin/users/\${id}/promote\`, {method:'POST'});
-  if (r.ok) { toast(\`\${username} \${isAdmin?'demoted':'promoted'}\`); loadUsers(); }
+  if (r.ok) { toast(\`\${username} \${isAdmin?'demoted':'promoted'}\`); window._usersLoaded=false; loadUsers(); }
+  else toast('Error', true);
+}
+
+async function banUser(id, username, banned) {
+  if (!confirm(\`\${banned?'Unban':'Ban'} \${username}?\`)) return;
+  const r = await fetch(\`/api/admin/users/\${id}/ban\`, {method:'POST'});
+  if (r.ok) { toast(\`\${username} \${banned?'unbanned':'banned'}\`, !banned); window._usersLoaded=false; loadUsers(); }
   else toast('Error', true);
 }
 
@@ -1099,26 +1447,45 @@ async function deleteScan(id, btn) {
   else toast('Error', true);
 }
 
+// ── SESSIONS ─────────────────────────────────────────────────────────────────
+async function loadSessions() {
+  const sessions = await fetch('/api/admin/sessions').then(r=>r.json()).catch(()=>[]);
+  const tb = document.getElementById('sessions-tbody');
+  tb.innerHTML = sessions.length ? sessions.map(s => \`<tr>
+    <td style="font-weight:600;color:#e0e0e8;">\${esc(s.username)}</td>
+    <td>\${s.isAdmin?'<span class="tag t-r">ADMIN</span>':'<span class="tag t-c">USER</span>'}</td>
+    <td style="color:#8888a0;">\${s.expiresIn}m</td>
+    <td style="color:#444458;font-size:10px;">\${esc(s.tokenPrefix)}</td>
+    <td><button class="ab ab-r" onclick="killSession('\${s.tokenPrefix.replace('...','').trim()}',this)">Kill</button></td>
+  </tr>\`).join('') : '<tr><td colspan="5" style="color:#444458;">No active sessions</td></tr>';
+}
+
+async function killSession(prefix, btn) {
+  if (!confirm('Kill this session? The user will be logged out.')) return;
+  const r = await fetch(\`/api/admin/sessions/\${prefix}\`, {method:'DELETE'});
+  if (r.ok) { btn.closest('tr').remove(); toast('Session killed'); }
+  else toast('Error', true);
+}
+
 // ── SETTINGS ─────────────────────────────────────────────────────────────────
 async function loadKeys() {
   const d = await fetch('/api/admin/api-keys').then(r=>r.json());
   const badge = (ok) => ok ? '<span class="tag t-g">✓ SET</span>' : '<span class="tag t-r">NOT SET</span>';
-  document.getElementById('hibp-st').outerHTML = badge(d.hibpConfigured).replace('class="tag', 'id="hibp-st" class="tag');
-  document.getElementById('abuse-st').outerHTML = badge(d.abuseConfigured).replace('class="tag', 'id="abuse-st" class="tag');
-  document.getElementById('shodan-st').outerHTML = badge(d.shodanConfigured).replace('class="tag', 'id="shodan-st" class="tag');
+  const setBadge = (id, ok) => { const el = document.getElementById(id); if (el) el.outerHTML = badge(ok).replace('class="tag', \`id="\${id}" class="tag\`); };
+  setBadge('hibp-st', d.hibpConfigured);
+  setBadge('abuse-st', d.abuseConfigured);
+  setBadge('shodan-st', d.shodanConfigured);
+  setBadge('vt-st', d.vtConfigured);
+  setBadge('urlscan-st', d.urlscanConfigured);
 }
 
 async function saveKeys() {
   const body = {};
-  const h = document.getElementById('key-hibp').value.trim();
-  const a = document.getElementById('key-abuse').value.trim();
-  const s = document.getElementById('key-shodan').value.trim();
-  if (h) body.HIBP_API_KEY = h;
-  if (a) body.ABUSEIPDB_API_KEY = a;
-  if (s) body.SHODAN_API_KEY = s;
+  const pairs = [['key-hibp','HIBP_API_KEY'],['key-abuse','ABUSEIPDB_API_KEY'],['key-shodan','SHODAN_API_KEY'],['key-vt','VIRUSTOTAL_API_KEY'],['key-urlscan','URLSCAN_API_KEY']];
+  for (const [eid, k] of pairs) { const v = document.getElementById(eid)?.value.trim(); if (v) body[k] = v; }
   if (!Object.keys(body).length) { document.getElementById('keys-msg').textContent = 'Nothing to save.'; return; }
   const r = await fetch('/api/admin/api-keys', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  if (r.ok) { toast('Keys saved'); document.getElementById('keys-msg').textContent = ''; loadKeys(); document.getElementById('key-hibp').value=''; document.getElementById('key-abuse').value=''; document.getElementById('key-shodan').value=''; }
+  if (r.ok) { toast('Keys saved'); document.getElementById('keys-msg').textContent = ''; loadKeys(); pairs.forEach(([eid])=>{ const el=document.getElementById(eid); if(el) el.value=''; }); }
   else toast('Error saving keys', true);
 }
 
@@ -1415,6 +1782,59 @@ async function httpPreview(targetUrl) {
   } catch (e) { return { error: e.message }; }
 }
 
+// ─── VIRUSTOTAL ──────────────────────────────────────────────────────────────
+async function virusTotalScan(target, resolvedIP) {
+  const key = process.env.VIRUSTOTAL_API_KEY;
+  if (!key || key === 'your_virustotal_key_here') return { error: 'No VIRUSTOTAL_API_KEY configured' };
+  try {
+    const headers = { 'x-apikey': key, 'Accept': 'application/json' };
+    const isIP = /^(\d{1,3}\.){3}\d{1,3}$/.test(target);
+    const endpoint = isIP
+      ? `https://www.virustotal.com/api/v3/ip_addresses/${encodeURIComponent(target)}`
+      : `https://www.virustotal.com/api/v3/domains/${encodeURIComponent(target)}`;
+    const res = await fetch(endpoint, { headers, timeout: 15000 });
+    if (!res.ok) return { error: `VirusTotal error: ${res.status}` };
+    const j = await res.json();
+    const attr = j.data?.attributes || {};
+    const stats = attr.last_analysis_stats || {};
+    const votes = attr.total_votes || {};
+    return {
+      malicious: stats.malicious || 0,
+      suspicious: stats.suspicious || 0,
+      harmless: stats.harmless || 0,
+      undetected: stats.undetected || 0,
+      reputation: attr.reputation || 0,
+      categories: attr.categories ? Object.values(attr.categories).slice(0, 5) : [],
+      communityMalicious: votes.malicious || 0,
+      communityHarmless: votes.harmless || 0,
+    };
+  } catch (e) { return { error: e.message }; }
+}
+
+// ─── URLSCAN.IO ───────────────────────────────────────────────────────────────
+async function urlScanSearch(domain) {
+  try {
+    const res = await fetch(`https://urlscan.io/api/v1/search/?q=domain:${encodeURIComponent(domain)}&size=5`, {
+      headers: { 'Accept': 'application/json', 'User-Agent': 'THREATOPS/1.0' }, timeout: 12000,
+    });
+    if (!res.ok) return { error: `URLScan error: ${res.status}` };
+    const j = await res.json();
+    const results = (j.results || []).slice(0, 5).map(r => ({
+      url: r.page?.url || '',
+      title: r.page?.title || '',
+      ip: r.page?.ip || '',
+      country: r.page?.country || '',
+      server: r.page?.server || '',
+      malicious: r.verdicts?.overall?.malicious || false,
+      score: r.verdicts?.overall?.score || 0,
+      tags: r.verdicts?.overall?.tags || [],
+      screenshot: r.screenshot || null,
+      ts: r.task?.time || null,
+    }));
+    return { total: j.total || 0, results };
+  } catch (e) { return { error: e.message }; }
+}
+
 // ─── FINDINGS ────────────────────────────────────────────────────────────────
 function generateFindings(results) {
   const findings = [];
@@ -1434,6 +1854,17 @@ function generateFindings(results) {
   if (results.abuseipdb && !results.abuseipdb.error) { const s = results.abuseipdb.abuseConfidenceScore || 0; if (s > 75) push('high', `IP abuse score: ${s}%`, `${results.abuseipdb.totalReports || 0} reports — high risk`, 'AbuseIPDB'); else if (s > 25) push('medium', `IP abuse score: ${s}%`, 'Suspicious activity reported', 'AbuseIPDB'); }
   if (results.shodan && !results.shodan.error) { for (const v of (results.shodan.vulns || []).slice(0, 10)) push('high', `CVE: ${v}`, 'Vulnerability detected via Shodan', 'Shodan'); }
   if (results.httpPreview && !results.httpPreview.error && results.httpPreview.iframes > 0) push('low', `${results.httpPreview.iframes} iframe(s) detected`, 'Review for clickjacking vectors', 'Preview');
+  if (results.virustotal && !results.virustotal.error) {
+    const { malicious, suspicious, reputation } = results.virustotal;
+    if (malicious > 5) push('high', `VirusTotal: ${malicious} engines flagged malicious`, `${malicious} AV engines detected threats`, 'VirusTotal');
+    else if (malicious > 0) push('medium', `VirusTotal: ${malicious} engine(s) flagged`, `Flagged by ${malicious} scanner(s)`, 'VirusTotal');
+    if (suspicious > 3) push('medium', `VirusTotal: ${suspicious} engines suspicious`, 'Suspicious activity detected', 'VirusTotal');
+    if (reputation < -5) push('medium', `VirusTotal reputation: ${reputation}`, 'Poor community reputation score', 'VirusTotal');
+  }
+  if (results.urlscan && !results.urlscan.error) {
+    const malFound = (results.urlscan.results || []).filter(r => r.malicious);
+    if (malFound.length > 0) push('high', `URLScan: ${malFound.length} malicious result(s)`, 'Recent scans flagged as malicious', 'URLScan');
+  }
 
   const order = { high: 0, medium: 1, low: 2, info: 3 };
   findings.sort((a, b) => order[a.severity] - order[b.severity]);
@@ -1510,6 +1941,8 @@ app.get('/api/scan', requireAuth, rateLimit, async (req, res) => {
     T('reverseDNS', 'Reverse DNS: resolving PTR records', () => reverseDNS(domain))(),
     T('httpPreview', 'Preview: fetching response', () => httpPreview(target))(),
     ...(email ? [T('breaches', 'Breach: checking HIBP', () => breachCheck(email))()] : [(async () => { send('breaches', { skipped: true }); })()]),
+    T('virustotal', 'VirusTotal: checking reputation', () => virusTotalScan(domain, resolvedIP))(),
+    T('urlscan', 'URLScan: searching scan history', () => urlScanSearch(domain))(),
     ...(resolvedIP
       ? [T('abuseipdb', 'AbuseIPDB: checking IP reputation', () => checkAbuseIPDB(resolvedIP))(), T('shodan', 'Shodan: querying host data', () => shodanLookup(resolvedIP))()]
       : [(async () => { send('abuseipdb', { error: 'Could not resolve IP' }); send('status', { module: 'abuseipdb', done: true, error: true, msg: 'AbuseIPDB: no IP' }); })(),

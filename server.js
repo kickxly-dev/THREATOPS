@@ -82,7 +82,7 @@ async function dbFindUser(username) {
     return u || null;
   }
   const { rows } = await pool.query(
-    `SELECT id, username, password_hash AS "passwordHash", onboarded, is_admin AS "isAdmin", created_at AS "createdAt"
+    `SELECT id, username, password_hash AS "passwordHash", onboarded, is_admin AS "isAdmin", created_at AS "createdAt", banned
      FROM users WHERE LOWER(username) = LOWER($1)`, [username]);
   return rows[0] || null;
 }
